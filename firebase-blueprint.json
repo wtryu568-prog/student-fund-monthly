@@ -1,0 +1,31 @@
+{
+  "entities": {
+    "AppState": {
+      "title": "Application State",
+      "description": "Full serialized state containing users, settings, bills, payments, transactions, market details, activities, etc.",
+      "type": "object",
+      "properties": {
+        "users": { "type": "array" },
+        "settings": { "type": "object" },
+        "monthlyBills": { "type": "array" },
+        "payments": { "type": "array" },
+        "transactions": { "type": "array" },
+        "marketWeeks": { "type": "array" },
+        "marketItems": { "type": "array" },
+        "marketTeams": { "type": "array" },
+        "activities": { "type": "array" },
+        "budgetRequests": { "type": "array" },
+        "announcements": { "type": "array" },
+        "notifications": { "type": "array" },
+        "logs": { "type": "array" },
+        "petitions": { "type": "array" }
+      }
+    }
+  },
+  "firestore": {
+    "/app_state/{docId}": {
+      "schema": "AppState",
+      "description": "Root state documents"
+    }
+  }
+}
