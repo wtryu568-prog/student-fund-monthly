@@ -17,8 +17,8 @@ const router = Router();
 router.post("/market/week/create", asyncHandler(async (req, res) => {
   const { weekDate, note, teamName, leaderId, memberIds, userId } = req.body;
   if (!weekDate || !userId) return res.status(400).json({ error: "Missing parameters" });
-  const { data: proposer } = await supabase.from("users").select("role").eq("id", userId).single();
-  if (!proposer || (proposer.role !== "treasurer" && proposer.role !== "committee")) return res.status(403).json({ error: "ขออภัย เฉพาะเหรัญญิกหรือคณะกรรมการเท่านั้นที่มีสิทธิ์เพิ่มรอบตลาดได้" });
+  const { data: proposer } = await supabase.from("users").select("id, role, is_active").eq("id", userId).single();
+  if (!proposer || proposer.is_active === false) return res.status(403).json({ error: "ขออภัย ไม่พบผู้ใช้หรือบัญชีผู้ใช้ของคุณถูกระงับ" });
 
   const weekId = `mkt_${Date.now()}`;
   const newWeek = { id: weekId, week_date: weekDate, total_cost: 0, total_revenue: 0, total_profit: 0, status: "planned", note: note || "", team_name: teamName || "กลุ่มขายสินค้าทั่วไป", leader_id: leaderId || userId, member_ids: memberIds || [], created_by: userId, created_at: new Date().toISOString() };
@@ -36,10 +36,12 @@ router.post("/market/week/update-team", asyncHandler(async (req, res) => {
   if (!week) return res.status(404).json({ error: "ไม่พบรอบตลาดนี้" });
 
   const { data: user } = await supabase.from("users").select("role").eq("id", userId).single();
+  const isCreator = week.created_by === userId;
   const isLeader = week.leader_id === userId;
+  const isMember = week.member_ids && week.member_ids.includes(userId);
   const isAdmin = user && (user.role === "treasurer" || user.role === "committee");
 
-  if (!isAdmin && !isLeader) return res.status(403).json({ error: "ไม่มีสิทธิ์ปรับปรุงข้อมูลทีม เฉพาะหัวหน้าทีมหรือคณะกรรมการเท่านั้น" });
+  if (!isAdmin && !isLeader && !isCreator && !isMember) return res.status(403).json({ error: "ไม่มีสิทธิ์ปรับปรุงข้อมูลทีม เฉพาะหัวหน้าทีม สมาชิกทีม หรือคณะกรรมการเท่านั้น" });
 
   const updates: Record<string, unknown> = {};
   if (teamName !== undefined) updates.team_name = teamName;
@@ -67,10 +69,11 @@ router.post("/market/item/add", asyncHandler(async (req, res) => {
   if (!week) return res.status(404).json({ error: "ไม่พบรอบตลาดนี้" });
 
   const { data: user } = await supabase.from("users").select("role").eq("id", userId).single();
+  const isCreator = week.created_by === userId;
   const isLeader = week.leader_id === userId;
   const isMember = week.member_ids && week.member_ids.includes(userId);
   const isAdmin = user && (user.role === "treasurer" || user.role === "committee");
-  if (!isAdmin && !isLeader && !isMember) return res.status(403).json({ error: "ไม่มีสิทธิ์เพิ่มรายการ เฉพาะสมาชิกทีมหรือกรรมการเท่านั้น" });
+  if (!isAdmin && !isLeader && !isMember && !isCreator) return res.status(403).json({ error: "ไม่มีสิทธิ์เพิ่มรายการ เฉพาะสมาชิกทีมหรือกรรมการเท่านั้น" });
 
   const itemId = `mkt_item_${Date.now()}`;
   const newItem = { id: itemId, market_week_id: marketWeekId, item_name: itemName, type, amount: numAmount, quantity: numQuantity, note: note || "", created_by: userId, created_at: new Date().toISOString() };
@@ -101,10 +104,11 @@ router.post("/market/item/delete", asyncHandler(async (req, res) => {
   if (!week) return res.status(404).json({ error: "ไม่พบรอบตลาด" });
 
   const { data: user } = await supabase.from("users").select("role").eq("id", userId).single();
+  const isCreator = week.created_by === userId;
   const isLeader = week.leader_id === userId;
   const isMember = week.member_ids && week.member_ids.includes(userId);
   const isAdmin = user && (user.role === "treasurer" || user.role === "committee");
-  if (!isAdmin && !isLeader && !isMember) return res.status(403).json({ error: "ไม่มีสิทธิ์ลบรายการ เฉพาะสมาชิกทีมหรือกรรมการเท่านั้น" });
+  if (!isAdmin && !isLeader && !isMember && !isCreator) return res.status(403).json({ error: "ไม่มีสิทธิ์ลบรายการ เฉพาะสมาชิกทีมหรือกรรมการเท่านั้น" });
 
   await supabase.from("market_items").delete().eq("id", itemId);
   await recalculateWeekTotals(item.market_week_id);
@@ -208,41 +212,117 @@ router.post("/market/week/approve", asyncHandler(async (req, res) => {
 
 // Market advance propose
 router.post("/market/week/advance/propose", asyncHandler(async (req, res) => {
-  const { marketWeekId, amount, reason, requesterId } = req.body;
-  if (!marketWeekId || !amount || !requesterId) return res.status(400).json({ error: "Missing required parameters" });
-  const numAmount = Number(amount);
-  if (isNaN(numAmount) || numAmount <= 0) return res.status(400).json({ error: "จำนวนเงินทุนล่วงหน้าต้องเป็นตัวเลขที่มากกว่า 0 บาท" });
+  const marketWeekId = req.body.marketWeekId || req.body.weekId || req.body.id;
+  const reason = req.body.reason || "";
+  const amount = req.body.amount;
+
+  if (!marketWeekId) {
+    return res.status(400).json({ error: "กรุณาระบุรอบตลาดที่ต้องการขอเบิกทุนค่ะ" });
+  }
 
   const { data: week } = await supabase.from("market_weeks").select("*").eq("id", marketWeekId).single();
   if (!week) return res.status(404).json({ error: "ไม่พบรอบตลาดนี้" });
-  const { data: requester } = await supabase.from("users").select("role").eq("id", requesterId).single();
-  const isLeader = week.leader_id === requesterId;
-  const isAdmin = requester && (requester.role === "treasurer" || requester.role === "committee");
-  if (!isAdmin && !isLeader) return res.status(403).json({ error: "ไม่มีสิทธิ์เสนอขอทุนล่วงหน้า เฉพาะหัวหน้าทีมหรือคณะกรรมการเท่านั้น" });
 
-  await supabase.from("market_weeks").update({ advance_requested: numAmount, advance_reason: reason || "", advance_status: "pending", advance_reject_reason: "" }).eq("id", marketWeekId);
+  const rawRequesterId = req.body.requesterId || req.body.userId || req.body.user_id;
+  const requesterId = rawRequesterId || week.created_by || week.leader_id || "system";
+
+  const numAmount = Number(amount || 0);
+  const parseAdvanceReason = (rawReason: string) => {
+    if (!rawReason) return { reason: "", carryForwardAmount: 0 };
+    if (rawReason.startsWith("CARRY_FORWARD_AMOUNT:")) {
+      const parts = rawReason.split(" | REASON:");
+      const carryForwardAmount = Number(parts[0].replace("CARRY_FORWARD_AMOUNT:", "")) || 0;
+      const reasonStr = parts[1] || "";
+      return { reason: reasonStr, carryForwardAmount };
+    }
+    return { reason: rawReason, carryForwardAmount: 0 };
+  };
+
+  const { carryForwardAmount } = parseAdvanceReason(reason || "");
+  const totalCapital = numAmount + carryForwardAmount;
+
+  if (isNaN(numAmount) || numAmount < 0) {
+    return res.status(400).json({ error: "จำนวนเงินทุนล่วงหน้าโอนเพิ่มใหม่ห้ามติดลบค่ะ" });
+  }
+  if (totalCapital <= 0) {
+    return res.status(400).json({ error: "กรุณาระบุเงินทุนยกมาจากรอบก่อนหน้า หรือระบุจำนวนเงินเบิกโอนเพิ่มใหม่ให้มากกว่า 0 บาทค่ะ" });
+  }
+
+  const { data: requester } = await supabase.from("users").select("role").eq("id", requesterId).maybeSingle();
+  const isCreator = week.created_by === requesterId;
+  const isLeader = week.leader_id === requesterId;
+  const isMember = week.member_ids && week.member_ids.includes(requesterId);
+  const isAdmin = requester && (requester.role === "treasurer" || requester.role === "committee");
+  if (!isAdmin && !isLeader && !isCreator && !isMember && rawRequesterId) return res.status(403).json({ error: "ไม่มีสิทธิ์เสนอขอทุนล่วงหน้า เฉพาะหัวหน้าทีม สมาชิกทีม หรือคณะกรรมการเท่านั้น" });
+
+  // If numAmount === 0 (0 new money from central fund, 100% using carried-forward capital in hand):
+  // Auto-approve immediately without needing treasurer's manual 0 baht transfer slip!
+  const isAutoApprove = numAmount === 0 && carryForwardAmount > 0;
+  const newAdvanceStatus = isAutoApprove ? "approved" : "pending";
+  const approvedBy = isAutoApprove ? requesterId : null;
+  const approvedAt = isAutoApprove ? new Date().toISOString() : null;
+
+  await supabase.from("market_weeks").update({
+    advance_requested: numAmount,
+    advance_reason: reason || "",
+    advance_status: newAdvanceStatus,
+    advance_approved_by: approvedBy,
+    advance_approved_at: approvedAt,
+    advance_reject_reason: ""
+  }).eq("id", marketWeekId);
+  
+  // If carry forward amount was pulled, mark referenced prior weeks as consumed in Supabase
+  if (reason && reason.includes("CARRY_FORWARD_AMOUNT:")) {
+    const match = reason.match(/รอบวันที่\s*([\d-]+)/);
+    if (match) {
+      const targetDate = match[1];
+      const { data: priorWeek } = await supabase.from("market_weeks").select("id, note").eq("week_date", targetDate).maybeSingle();
+      if (priorWeek && priorWeek.note && priorWeek.note.includes("[CARRY_FORWARD_REMAINING:")) {
+        const updatedNote = priorWeek.note.replace(/\[CARRY_FORWARD_REMAINING:[\d.]+\]/, "[CARRY_FORWARD_REMAINING:0]").trim();
+        await supabase.from("market_weeks").update({ note: updatedNote }).eq("id", priorWeek.id);
+      }
+    }
+  }
+
   const { data: updatedWeek } = await supabase.from("market_weeks").select("*").eq("id", marketWeekId).single();
   const { data: treasurers } = await supabase.from("users").select("id").eq("role", "treasurer");
-  for (const t of (treasurers || [])) {
-    await createNotification(t.id, "มีคำขอเบิกเงินทุนล่วงหน้าตลาด 💰", `ทีม ${updatedWeek?.team_name || "ทั่วไป"} ขอเบิกทุนล่วงหน้าจำนวน ${numAmount} บาท`, "market", marketWeekId, "market");
+  
+  if (isAutoApprove) {
+    for (const t of (treasurers || [])) {
+      await createNotification(t.id, "ทีมเปิดใช้งานทุนหมุนเวียนคงเหลือ 🔄", `ทีม ${updatedWeek?.team_name || "ทั่วไป"} เปิดใช้งานทุนหมุนเวียนสะสมยกมาจำนวน ${carryForwardAmount} บาท สำหรับรอบ ${updatedWeek?.week_date}`, "market", marketWeekId, "market");
+    }
+    await writeLog(requesterId, "auto_approve_market_advance_carry_only", "market_week", marketWeekId, { amount: numAmount, carryForwardAmount });
+  } else {
+    for (const t of (treasurers || [])) {
+      await createNotification(t.id, "มีคำขอเบิกเงินทุนล่วงหน้าตลาด 💰", `ทีม ${updatedWeek?.team_name || "ทั่วไป"} ขอเบิกทุนล่วงหน้าเพิ่มจำนวน ${numAmount} บาท`, "market", marketWeekId, "market");
+    }
+    await writeLog(requesterId, "propose_market_advance", "market_week", marketWeekId, { amount: numAmount, carryForwardAmount });
   }
-  await writeLog(requesterId, "propose_market_advance", "market_week", marketWeekId, { amount: numAmount });
+
   res.json({ success: true, marketWeek: convertKeysToCamel(updatedWeek) });
 }));
 
 // Market advance additional propose
 router.post("/market/week/advance-additional/propose", asyncHandler(async (req, res) => {
-  const { marketWeekId, amount, reason, requesterId } = req.body;
-  if (!marketWeekId || !amount || !requesterId) return res.status(400).json({ error: "Missing required parameters" });
+  const marketWeekId = req.body.marketWeekId || req.body.weekId || req.body.id;
+  const amount = req.body.amount;
+  const reason = req.body.reason || "";
+  const requesterId = req.body.requesterId || req.body.userId || req.body.user_id;
+
+  if (!marketWeekId || !amount || !requesterId) {
+    return res.status(400).json({ error: "กรุณาระบุรอบตลาด จำนวนเงิน และผู้ขอเบิกทุนให้ครบถ้วนค่ะ" });
+  }
   const numAmount = Number(amount);
   if (isNaN(numAmount) || numAmount <= 0) return res.status(400).json({ error: "จำนวนเงินทุนเพิ่มเติมต้องเป็นตัวเลขที่มากกว่า 0 บาท" });
 
   const { data: week } = await supabase.from("market_weeks").select("*").eq("id", marketWeekId).single();
   if (!week) return res.status(404).json({ error: "ไม่พบรอบตลาดนี้" });
   const { data: requester } = await supabase.from("users").select("role").eq("id", requesterId).single();
+  const isCreator = week.created_by === requesterId;
   const isLeader = week.leader_id === requesterId;
+  const isMember = week.member_ids && week.member_ids.includes(requesterId);
   const isAdmin = requester && (requester.role === "treasurer" || requester.role === "committee");
-  if (!isAdmin && !isLeader) return res.status(403).json({ error: "ไม่มีสิทธิ์เสนอขอทุนเพิ่มเติม เฉพาะหัวหน้าทีมหรือคณะกรรมการเท่านั้น" });
+  if (!isAdmin && !isLeader && !isCreator && !isMember) return res.status(403).json({ error: "ไม่มีสิทธิ์เสนอขอทุนเพิ่มเติม เฉพาะหัวหน้าทีม สมาชิกทีม หรือคณะกรรมการเท่านั้น" });
 
   await supabase.from("market_weeks").update({ additional_advance_requested: numAmount, additional_advance_reason: reason || "", additional_advance_status: "pending", additional_advance_reject_reason: "" }).eq("id", marketWeekId);
   const { data: updatedWeek } = await supabase.from("market_weeks").select("*").eq("id", marketWeekId).single();
@@ -256,13 +336,20 @@ router.post("/market/week/advance-additional/propose", asyncHandler(async (req, 
 
 // Market advance additional approve/reject
 router.post("/market/week/advance-additional/approve", asyncHandler(async (req, res) => {
-  const { marketWeekId, treasurerId, action, rejectReason, receiptUrl } = req.body;
-  if (!marketWeekId || !treasurerId || !action) return res.status(400).json({ error: "Missing required parameters" });
+  const marketWeekId = req.body.marketWeekId || req.body.weekId || req.body.id;
+  const treasurerId = req.body.treasurerId || req.body.userId || req.body.user_id || req.body.adminId;
+  const action = req.body.action;
+  const rejectReason = req.body.rejectReason || req.body.reason || "";
+  const receiptUrl = req.body.receiptUrl || req.body.receipt_url || req.body.slipUrl || "";
+
+  if (!marketWeekId || !treasurerId || !action) {
+    return res.status(400).json({ error: "กรุณาระบุรอบตลาด ผู้ดำเนินการ และการตัดสินใจค่ะ" });
+  }
   const { data: week } = await supabase.from("market_weeks").select("*").eq("id", marketWeekId).single();
   if (!week) return res.status(404).json({ error: "Market week not found" });
 
   if (action === "approve") {
-    if (!receiptUrl) return res.status(400).json({ error: "Missing payment transfer slip" });
+    if (!receiptUrl) return res.status(400).json({ error: "กรุณาแนบสลิปการโอนเงินทุนเพิ่มเติมค่ะ" });
     await supabase.from("market_weeks").update({ additional_advance_status: "approved", additional_advance_receipt_url: receiptUrl, additional_advance_approved_by: treasurerId, additional_advance_approved_at: new Date().toISOString(), additional_advance_reject_reason: "" }).eq("id", marketWeekId);
     if (week.additional_advance_requested > 0) {
       const { error: addAdvErr } = await supabase.from("transactions").insert({ id: `tx_${Date.now()}_adv_add`, type: "expense", category: "other_expense", amount: week.additional_advance_requested, description: `จ่ายเงินทุนล่วงหน้าเพิ่มเติมตลาดวันพุธ: ${week.team_name} (${week.week_date})`, reference_id: week.id, reference_type: "market", created_by: treasurerId, approved_by: treasurerId, approved_at: new Date().toISOString(), month: new Date().getMonth() + 1, year: 2569, is_closed: false, created_at: new Date().toISOString() });
@@ -285,13 +372,20 @@ router.post("/market/week/advance-additional/approve", asyncHandler(async (req, 
 
 // Market advance approve/reject
 router.post("/market/week/advance/approve", asyncHandler(async (req, res) => {
-  const { marketWeekId, treasurerId, action, rejectReason, receiptUrl } = req.body;
-  if (!marketWeekId || !treasurerId || !action) return res.status(400).json({ error: "Missing required parameters" });
+  const marketWeekId = req.body.marketWeekId || req.body.weekId || req.body.id;
+  const treasurerId = req.body.treasurerId || req.body.userId || req.body.user_id || req.body.adminId;
+  const action = req.body.action;
+  const rejectReason = req.body.rejectReason || req.body.reason || "";
+  const receiptUrl = req.body.receiptUrl || req.body.receipt_url || req.body.slipUrl || "";
+
+  if (!marketWeekId || !treasurerId || !action) {
+    return res.status(400).json({ error: "กรุณาระบุรอบตลาด ผู้ดำเนินการ และการตัดสินใจค่ะ" });
+  }
   const { data: week } = await supabase.from("market_weeks").select("*").eq("id", marketWeekId).single();
   if (!week) return res.status(404).json({ error: "Market week not found" });
 
   if (action === "approve") {
-    if (!receiptUrl && week.advance_requested > 0) return res.status(400).json({ error: "Missing payment transfer slip" });
+    if (!receiptUrl && week.advance_requested > 0) return res.status(400).json({ error: "กรุณาแนบสลิปการโอนเงินทุนล่วงหน้าค่ะ" });
     await supabase.from("market_weeks").update({ advance_status: "approved", advance_receipt_url: receiptUrl || "", advance_approved_by: treasurerId, advance_approved_at: new Date().toISOString(), advance_reject_reason: "" }).eq("id", marketWeekId);
     if (week.advance_requested > 0) {
       const { error: advTxErr } = await supabase.from("transactions").insert({ id: `tx_${Date.now()}_adv`, type: "expense", category: "other_expense", amount: week.advance_requested, description: `จ่ายเงินทุนล่วงหน้าตลาดวันพุธ: ${week.team_name} (${week.week_date})`, reference_id: week.id, reference_type: "market", created_by: treasurerId, approved_by: treasurerId, approved_at: new Date().toISOString(), month: new Date(week.week_date).getMonth() + 1, year: 2569, is_closed: false, created_at: new Date().toISOString() });

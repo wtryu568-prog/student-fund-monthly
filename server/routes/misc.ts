@@ -86,16 +86,21 @@ router.post("/announcements/delete", asyncHandler(async (req, res) => {
 // ===================== TRANSACTIONS =====================
 
 router.post("/transactions/close-month", asyncHandler(async (req, res) => {
-  const { month, year, userId } = req.body;
-  if (!month || !year || !userId) return res.status(400).json({ error: "Missing fields" });
+  const month = req.body.month !== undefined ? Number(req.body.month) : undefined;
+  const year = req.body.year !== undefined ? Number(req.body.year) : undefined;
+  const userId = req.body.userId || req.body.user_id || "treasurer";
+  if (month === undefined || year === undefined || isNaN(month) || isNaN(year)) {
+    return res.status(400).json({ error: "กรุณาระบุเดือนและปีที่ต้องการปิดยอดค่ะ" });
+  }
   await supabase.from("transactions").update({ is_closed: true }).eq("month", Number(month)).eq("year", Number(year));
   await writeLog(userId, "close_accounts_month", "transactions", `${month}/${year}`);
   res.json({ success: true });
 }));
 
 router.post("/transactions/delete", asyncHandler(async (req, res) => {
-  const { transactionId, userId } = req.body;
-  if (!transactionId || !userId) return res.status(400).json({ error: "Missing parameters" });
+  const transactionId = req.body.transactionId || req.body.transaction_id || req.body.id || req.body.txId;
+  const userId = req.body.userId || req.body.user_id || req.body.adminId;
+  if (!transactionId || !userId) return res.status(400).json({ error: "กรุณาระบุรหัสรายการที่ต้องการลบและผู้ดำเนินการค่ะ" });
   const { data: user } = await supabase.from("users").select("role").eq("id", userId).single();
   if (!user || user.role !== "treasurer") return res.status(403).json({ error: "เฉพาะเหรัญญิกเท่านั้นที่สามารถลบรายการบัญชีได้" });
 

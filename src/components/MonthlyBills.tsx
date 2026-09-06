@@ -80,6 +80,10 @@ export default function MonthlyBills({
     const userBills = monthlyBills.filter(b => b.userId === targetUserId);
     setSelectedBill(userBills.find(b => b.status !== "paid") || userBills[0] || null);
     setPaymentMethod("transfer");
+    setUploadSuccess(false);
+    setSlipUrl("");
+    setSlipFile(null);
+    setNote("");
   }, [targetUserId, monthlyBills]);
 
   const [slipFile, setSlipFile] = useState<File | null>(null);
@@ -736,18 +740,21 @@ export default function MonthlyBills({
                       <>
                         {/* Image Preview Block */}
                         {slipUrl ? (
-                          <div className="relative rounded-2xl overflow-hidden border border-slate-200 shadow-sm max-h-48 group">
+                          <div className="relative rounded-2xl overflow-hidden border border-slate-200 shadow-sm max-h-48 group bg-slate-50">
                             <img src={slipUrl} alt="Slip Upload Preview" className="w-full h-48 object-contain bg-slate-100" />
-                            <button 
-                              type="button"
-                              onClick={() => {
-                                setSlipUrl("");
-                                setSlipFile(null);
-                              }}
-                              className="absolute top-2 right-2 bg-slate-800/80 hover:bg-slate-900 text-white rounded-full p-1.5 transition-all text-xs"
-                            >
-                              เปลี่ยนรูปภาพ
-                            </button>
+                            <div className="absolute top-2 right-2 flex items-center gap-1.5">
+                              <button 
+                                type="button"
+                                onClick={() => {
+                                  setSlipUrl("");
+                                  setSlipFile(null);
+                                }}
+                                className="bg-rose-600 hover:bg-rose-700 text-white rounded-xl px-2.5 py-1 transition-all text-xs font-bold shadow-md flex items-center gap-1"
+                                title="ลบรูปสลิปนี้"
+                              >
+                                🗑️ ลบสลิป
+                              </button>
+                            </div>
                           </div>
                         ) : (
                           <div className="border-2 border-dashed border-slate-200 hover:border-blue-400 rounded-2xl p-6 transition-all text-center flex flex-col items-center justify-center bg-slate-50/50 cursor-pointer relative">

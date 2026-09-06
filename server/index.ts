@@ -17,7 +17,7 @@ import { createServer as createViteServer } from "vite";
 import { validateEnv, ENV } from "./config/env";
 validateEnv();
 
-import { testSupabaseConnection, supabase } from "./config/supabase";
+import { testSupabaseConnection, supabase, dbConnected } from "./config/supabase";
 
 // Middleware
 import { applySecurityMiddleware } from "./middleware/security";
@@ -69,6 +69,10 @@ function setupGracefulShutdown(server: ReturnType<typeof app.listen>) {
 // Auto cleanup helper for monthly bill slips older than 30 days
 // =============================================
 async function runAutoCleanupOldSlips() {
+  if (!dbConnected) {
+    console.log("[Auto Cleanup] Database not connected. Skipping routine.");
+    return;
+  }
   try {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);

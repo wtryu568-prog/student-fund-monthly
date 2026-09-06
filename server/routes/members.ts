@@ -14,8 +14,13 @@ const router = Router();
 
 // Members - Update
 router.post("/members/update", asyncHandler(async (req, res) => {
-  const { targetUserId, role, position, isActive, userId, fullName, nickname, email, phone, classroom } = req.body;
-  if (!targetUserId || !userId) return res.status(400).json({ error: "Missing parameters" });
+  const targetUserId = req.body.targetUserId || req.body.target_user_id || req.body.memberId || req.body.id;
+  const userId = req.body.userId || req.body.user_id || req.body.adminId;
+  const { role, position, isActive, fullName, nickname, email, phone, classroom } = req.body;
+
+  if (!targetUserId || !userId) {
+    return res.status(400).json({ error: "กรุณาระบุรหัสสมาชิกที่ต้องการแก้ไขและผู้ดำเนินการค่ะ" });
+  }
 
   const { data: actingUser } = await supabase.from("users").select("*").eq("id", userId).single();
   const { data: targetUser } = await supabase.from("users").select("*").eq("id", targetUserId).single();
@@ -77,8 +82,11 @@ router.post("/members/add", asyncHandler(async (req, res) => {
 
 // Members - Delete
 router.post("/members/delete", asyncHandler(async (req, res) => {
-  const { targetUserId, userId } = req.body;
-  if (!targetUserId || !userId) return res.status(400).json({ error: "Missing parameters" });
+  const targetUserId = req.body.targetUserId || req.body.target_user_id || req.body.memberId || req.body.id;
+  const userId = req.body.userId || req.body.user_id || req.body.adminId;
+  if (!targetUserId || !userId) {
+    return res.status(400).json({ error: "กรุณาระบุรหัสสมาชิกที่ต้องการลบและผู้ดำเนินการค่ะ" });
+  }
 
   const { data: creator } = await supabase.from("users").select("role").eq("id", userId).single();
   if (!creator || creator.role !== "treasurer") return res.status(403).json({ error: "ไม่มีสิทธิ์ดำเนินการ (เฉพาะเหรัญญิกเท่านั้น)" });

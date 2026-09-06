@@ -13,6 +13,7 @@ import {
   DollarSign, 
   PlusCircle, 
   Trash2,
+  Download,
   ListFilter,
   QrCode,
   Upload,
@@ -40,7 +41,7 @@ import {
   LogIn
 } from "lucide-react";
 import { User, Payment, MonthlyBill, Transaction, getDetailedBillStatus, SystemSettings, PasswordReset, AppState } from "../types";
-import { googleSignIn, logoutGoogle, getAccessToken, getStoredUser, auth as driveAuth } from "../lib/driveAuth";
+import { googleSignIn, logoutGoogle, getAccessToken, getStoredUser, clearGoogleSession, auth as driveAuth } from "../lib/driveAuth";
 import { 
   uploadBackupToDrive, 
   listBackupsFromDrive, 
@@ -207,35 +208,110 @@ export default function AdminPanel({
   const [slipGallerySearch, setSlipGallerySearch] = useState<string>("");
   const [viewingSlipPayment, setViewingSlipPayment] = useState<Payment | null>(null);
   const [isPurgingBase64, setIsPurgingBase64] = useState<boolean>(false);
+  const [isPurgingSlips, setIsPurgingSlips] = useState<boolean>(false);
+  const [showPurgeSlipModal, setShowPurgeSlipModal] = useState<boolean>(false);
+  const [purgeSlipMode, setPurgeSlipMode] = useState<"base64" | "older_30_days" | "all">("base64");
   const [isMigratingImages, setIsMigratingImages] = useState<boolean>(false);
   const [migrationResult, setMigrationResult] = useState<{ migratedCount: number; errors: string[] } | null>(null);
   const [showMigrationModal, setShowMigrationModal] = useState<boolean>(false);
   const [migrationModalError, setMigrationModalError] = useState<string | null>(null);
   const [migrationModalSuccess, setMigrationModalSuccess] = useState<string | null>(null);
 
-  const handlePurgeBase64Slips = async () => {
-    if (!window.confirm("⚠️ ยืนยันการเคลียร์ไฟล์รูปภาพ Base64 ออกจากคลาวด์ DB ใช่หรือไม่?\n\nการดำเนินการนี้จะลบไฟล์รูปภาพ Base64 ที่ตกค้างในตารางคลาวด์ DB เพื่อให้ฐานข้อมูลว่างเปล่าและเบาหวิว 100%\n(ประวัติการชำระเงิน ยอดเงิน เลขใบเสร็จ และสลิปที่ย้ายไป Google Drive แล้วจะยังคงอยู่ครบถ้วน)")) {
-      return;
-    }
+  // In-app dialogs (Safe from iframe modal restrictions)
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    confirmLabel?: string;
+    cancelLabel?: string;
+    isDestructive?: boolean;
+    onConfirm: () => Promise<void> | void;
+  } | null>(null);
 
-    setIsPurgingBase64(true);
+  const [feedbackModal, setFeedbackModal] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    type?: "success" | "error" | "info";
+  } | null>(null);
+
+  const handleOpenPurgeSlipModal = () => {
+    setShowPurgeSlipModal(true);
+  };
+
+  const handleExecutePurgeSlips = async (mode: "base64" | "older_30_days" | "all") => {
+    setIsPurgingSlips(true);
     try {
-      const res = await fetch("/api/system/purge-base64-slips", {
+      const endpoint = mode === "base64" ? "/api/system/purge-base64-slips" : "/api/system/purge-all-slips";
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: currentUser.id })
+        body: JSON.stringify({ userId: currentUser.id, mode })
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "เกิดข้อผิดพลาดในการลบรูปภาพ Base64");
+      if (!res.ok) throw new Error(data.error || "เกิดข้อผิดพลาดในการเคลียร์สลิป");
 
-      alert(data.message || `🎉 เคลียร์รูปภาพ Base64 ออกจาก DB สำเร็จเรียบร้อยจำนวน ${data.purgedCount} รูป!`);
+      setShowPurgeSlipModal(false);
+      setFeedbackModal({
+        isOpen: true,
+        title: "เคลียร์สลิปสำเร็จ 🎉",
+        message: data.message || "ดำเนินการเคลียร์ข้อมูลรูปภาพสลิปเรียบร้อยแล้วค่ะ",
+        type: "success"
+      });
       await loadBackupsAndDiag();
     } catch (err: any) {
       console.error(err);
-      alert(`ไม่สามารถเคลียร์รูปภาพ Base64 ได้: ${err.message}`);
+      setFeedbackModal({
+        isOpen: true,
+        title: "ไม่สามารถเคลียร์สลิปได้",
+        message: err.message || "เกิดข้อผิดพลาดในการติดต่อเซิร์ฟเวอร์",
+        type: "error"
+      });
     } finally {
-      setIsPurgingBase64(false);
+      setIsPurgingSlips(false);
     }
+  };
+
+  const handlePurgeBase64Slips = async () => {
+    handleOpenPurgeSlipModal();
+  };
+
+  const handleClearSingleSlip = async (paymentId: string) => {
+    setConfirmDialog({
+      isOpen: true,
+      title: "ยืนยันการลบไฟล์รูปสลิปนี้",
+      message: "ต้องการลบรูปภาพสลิปนี้ออกจากระบบใช่หรือไม่? (ประวัติยอดเงิน วันที่ และเลขใบเสร็จยังคงอยู่ครบถ้วน 100%)",
+      confirmLabel: "ยืนยันลบสลิป",
+      cancelLabel: "ยกเลิก",
+      isDestructive: true,
+      onConfirm: async () => {
+        try {
+          const res = await fetch("/api/system/clear-single-slip", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ userId: currentUser.id, paymentId })
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.error || "เกิดข้อผิดพลาดในการลบสลิป");
+
+          setViewingSlipPayment(prev => prev && prev.id === paymentId ? { ...prev, slipUrl: "deleted" } : null);
+          setFeedbackModal({
+            isOpen: true,
+            title: "ลบรูปสลิปสำเร็จ",
+            message: data.message || "ลบและเคลียร์ไฟล์รูปสลิปรายการนี้เรียบร้อยแล้วค่ะ",
+            type: "success"
+          });
+          await loadBackupsAndDiag();
+        } catch (err: any) {
+          setFeedbackModal({
+            isOpen: true,
+            title: "เกิดข้อผิดพลาด",
+            message: err.message || "ไม่สามารถลบสลิปได้",
+            type: "error"
+          });
+        }
+      }
+    });
   };
 
   const handleGenerateSummary = async () => {
@@ -269,6 +345,52 @@ export default function AdminPanel({
     navigator.clipboard.writeText(summaryText);
     setCopySuccess(true);
     setTimeout(() => setCopySuccess(false), 2000);
+  };
+
+  const [isDownloadingSlipsZip, setIsDownloadingSlipsZip] = useState<boolean>(false);
+
+  const handleDownloadAllSlipsZip = async () => {
+    setIsDownloadingSlipsZip(true);
+    try {
+      const response = await fetch("/api/system/download-all-slips", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: currentUser.id })
+      });
+
+      if (!response.ok) {
+        const errData = await safeParseJson(response);
+        throw new Error(String(errData.error || "เกิดข้อผิดพลาดในการดาวน์โหลดสลิป"));
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const dateStr = new Date().toISOString().split("T")[0];
+      a.download = `student_fund_slips_${dateStr}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+
+      setFeedbackModal({
+        isOpen: true,
+        title: "ดาวน์โหลดสลิปสำเร็จ 🎉",
+        message: "ดาวน์โหลดไฟล์รูปภาพสลิปทั้งหมดรวมในรูปแบบ ZIP ลงเครื่องคอมพิวเตอร์เรียบร้อยแล้วค่ะ!\n\nคุณสามารถกดปุ่มเคลียร์รูปภาพในระบบเพื่อคืนพื้นที่ให้ฐานข้อมูลได้อย่างปลอดภัยค่ะ",
+        type: "success"
+      });
+    } catch (err: any) {
+      console.error(err);
+      setFeedbackModal({
+        isOpen: true,
+        title: "เกิดข้อผิดพลาด",
+        message: err?.message || "ไม่สามารถดาวน์โหลดสลิปได้ กรุณาลองใหม่อีกครั้งค่ะ",
+        type: "info"
+      });
+    } finally {
+      setIsDownloadingSlipsZip(false);
+    }
   };
 
   const handleMigrateImagesToDrive = () => {
@@ -328,6 +450,22 @@ export default function AdminPanel({
     }
   };
 
+  const handleDriveAuthError = (err: any) => {
+    const isExpired = err?.message?.includes("expired") || err?.message?.includes("unauthorized") || err?.message?.includes("401") || err?.message?.includes("UNAUTHORIZED");
+    if (isExpired) {
+      clearGoogleSession();
+      setGoogleUser(null);
+      setGoogleToken(null);
+      setDriveBackups([]);
+      setDriveImages([]);
+      setDriveError("เซสชัน Google Drive หมดอายุ กรุณากดเชื่อมต่อใหม่อีกครั้งค่ะ");
+      console.warn("[Google Drive] Session expired. Stale token has been cleared.");
+    } else {
+      console.warn("[Google Drive API Notice]:", err?.message || err);
+      setDriveError(err?.message || "เกิดข้อผิดพลาดในการเชื่อมต่อกับ Google Drive");
+    }
+  };
+
   const loadDriveBackups = async (token: string) => {
     setIsLoadingDriveBackups(true);
     setDriveError(null);
@@ -335,8 +473,7 @@ export default function AdminPanel({
       const files = await listBackupsFromDrive(token);
       setDriveBackups(files);
     } catch (err: any) {
-      console.error(err);
-      setDriveError(err.message || "ไม่สามารถโหลดข้อมูลแบ็กอัปจาก Google Drive ได้");
+      handleDriveAuthError(err);
     } finally {
       setIsLoadingDriveBackups(false);
     }
@@ -349,8 +486,7 @@ export default function AdminPanel({
       const files = await listImagesFromDrive(token);
       setDriveImages(files);
     } catch (err: any) {
-      console.error(err);
-      setDriveError(err.message || "ไม่สามารถโหลดรายชื่อรูปภาพจาก Google Drive ได้");
+      handleDriveAuthError(err);
     } finally {
       setIsLoadingDriveImages(false);
     }
@@ -376,8 +512,7 @@ export default function AdminPanel({
         setDriveImageSuccessMsg(`🎉 อัปโหลดรูปภาพ "${uploadedFile.name}" ขึ้น Google Drive สำเร็จแล้ว!`);
         await loadDriveImages(googleToken);
       } catch (err: any) {
-        console.error(err);
-        setDriveError(`อัปโหลดรูปภาพล้มเหลว: ${err.message}`);
+        handleDriveAuthError(err);
       } finally {
         setIsUploadingDriveImage(false);
         if (e.target) e.target.value = "";
@@ -398,8 +533,7 @@ export default function AdminPanel({
         const objectUrl = await downloadImageBlobFromDrive(googleToken, fileId);
         setPreviewImageUrl({ id: fileId, name: fileName, url: objectUrl });
       } catch (err: any) {
-        console.error(err);
-        alert(`ดึงรูปภาพจาก Google Drive ไม่สำเร็จ: ${err.message}`);
+        handleDriveAuthError(err);
       } finally {
         setIsLoadingPreviewImage(false);
       }
@@ -455,23 +589,43 @@ export default function AdminPanel({
   };
 
   const handleDisconnectGoogle = async () => {
-    if (!confirm("ต้องการยกเลิกการเชื่อมต่อ Google Drive ใช่หรือไม่?")) return;
-    return withLoading(async () => {
-      try {
-        await logoutGoogle();
-        setGoogleUser(null);
-        setGoogleToken(null);
-        setDriveBackups([]);
-      } catch (err: any) {
-        console.error(err);
+    setConfirmDialog({
+      isOpen: true,
+      title: "ยกเลิกการเชื่อมต่อ Google Drive",
+      message: "ต้องการยกเลิกการเชื่อมต่อบัญชี Google Drive ใช่หรือไม่?",
+      confirmLabel: "ยกเลิกการเชื่อมต่อ",
+      cancelLabel: "ปิด",
+      isDestructive: true,
+      onConfirm: async () => {
+        return withLoading(async () => {
+          try {
+            await logoutGoogle();
+            setGoogleUser(null);
+            setGoogleToken(null);
+            setDriveBackups([]);
+            setFeedbackModal({
+              isOpen: true,
+              title: "ยกเลิกการเชื่อมต่อสำเร็จ",
+              message: "ยกเลิกการเชื่อมต่อ Google Drive เรียบร้อยแล้วค่ะ",
+              type: "info"
+            });
+          } catch (err: any) {
+            console.error(err);
+          }
+        }, "กำลังยกเลิกการเชื่อมต่อ...");
       }
-    }, "กำลังยกเลิกการเชื่อมต่อ...");
+    });
   };
 
   const handleBackupToDrive = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!googleToken) {
-      alert("กรุณาเชื่อมต่อ Google Drive ก่อนค่ะ");
+      setFeedbackModal({
+        isOpen: true,
+        title: "แจ้งเตือน",
+        message: "กรุณาเชื่อมต่อ Google Drive ก่อนค่ะ",
+        type: "info"
+      });
       return;
     }
     return withLoading(async () => {
@@ -492,11 +646,15 @@ export default function AdminPanel({
         await uploadBackupToDrive(googleToken, currentState as unknown as AppState, note);
         
         setDriveBackupNote("");
-        alert("บันทึกข้อมูลสำรองไปยัง Google Drive ของคุณเรียบร้อยแล้ว! ☁️💾");
+        setFeedbackModal({
+          isOpen: true,
+          title: "สำรองข้อมูลสำเร็จ 🎉",
+          message: "บันทึกข้อมูลสำรองไปยัง Google Drive ของคุณเรียบร้อยแล้ว! ☁️💾",
+          type: "success"
+        });
         loadDriveBackups(googleToken);
       } catch (err: any) {
-        console.error(err);
-        setDriveError(err.message || "บันทึกล้มเหลว");
+        handleDriveAuthError(err);
       } finally {
         setIsUploadingToDrive(false);
       }
@@ -505,53 +663,75 @@ export default function AdminPanel({
 
   const handleRestoreFromDrive = async (fileId: string, fileName: string) => {
     if (!googleToken) return;
-    if (!confirm(`⚠️ คำเตือน! คุณแน่ใจใช่หรือไม่ว่าต้องการกู้คืนข้อมูลระบบทั้งหมดจากไฟล์บน Google Drive: "${fileName}"?\n\nข้อมูลในระบบปัจจุบันทั้งหมดจะถูกเขียนทับ!`)) {
-      return;
-    }
-    
-    return withLoading(async () => {
-      setIsRestoringFromDriveId(fileId);
-      try {
-        const backupState = await downloadBackupFromDrive(googleToken, fileId);
+    setConfirmDialog({
+      isOpen: true,
+      title: "ยืนยันการกู้คืนข้อมูลจาก Google Drive",
+      message: `⚠️ คำเตือน!\nคุณแน่ใจใช่หรือไม่ว่าต้องการกู้คืนข้อมูลระบบทั้งหมดจากไฟล์บน Google Drive: "${fileName}"?\n\nข้อมูลในระบบปัจจุบันทั้งหมดจะถูกแทนที่ด้วยข้อมูลจากไฟล์นี้!`,
+      confirmLabel: "ยืนยันกู้คืนระบบ",
+      cancelLabel: "ยกเลิก",
+      isDestructive: true,
+      onConfirm: async () => {
+        return withLoading(async () => {
+          setIsRestoringFromDriveId(fileId);
+          try {
+            const backupState = await downloadBackupFromDrive(googleToken, fileId);
 
-        const res = await fetch("/api/backups/upload", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ uploadedState: backupState, userId: currentUser.id })
-        });
+            const res = await fetch("/api/backups/upload", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ uploadedState: backupState, userId: currentUser.id })
+            });
 
-        if (!res.ok) {
-          const errData = await safeParseJson(res);
-          throw new Error(String(errData.error || "กู้คืนข้อมูลบนเซิร์ฟเวอร์ล้มเหลว"));
-        }
+            if (!res.ok) {
+              const errData = await safeParseJson(res);
+              throw new Error(String(errData.error || "กู้คืนข้อมูลบนเซิร์ฟเวอร์ล้มเหลว"));
+            }
 
-        alert("🎉 ดึงข้อมูลจาก Google Drive และคืนค่าระบบสำเร็จแล้ว!");
-        window.location.reload();
-      } catch (err: any) {
-        console.error(err);
-        alert("การกู้คืนล้มเหลว: " + err.message);
-      } finally {
-        setIsRestoringFromDriveId(null);
+            setFeedbackModal({
+              isOpen: true,
+              title: "กู้คืนระบบสำเร็จ 🎉",
+              message: "ดึงข้อมูลจาก Google Drive และคืนค่าระบบสำเร็จแล้ว! ระบบกำลังโหลดข้อมูลใหม่...",
+              type: "success"
+            });
+            setTimeout(() => {
+              window.location.reload();
+            }, 1500);
+          } catch (err: any) {
+            handleDriveAuthError(err);
+          } finally {
+            setIsRestoringFromDriveId(null);
+          }
+        }, "กำลังดาวน์โหลดและกู้คืนข้อมูลจาก Google Drive...");
       }
-    }, "กำลังดาวน์โหลดและกู้คืนข้อมูลจาก Google Drive...");
+    });
   };
 
   const handleDeleteFromDrive = async (fileId: string, fileName: string) => {
     if (!googleToken) return;
-    if (!confirm(`⚠️ คำเตือน! ต้องการลบไฟล์สำรอง "${fileName}" ออกจาก Google Drive ถาวรใช่หรือไม่?`)) {
-      return;
-    }
-    
-    return withLoading(async () => {
-      try {
-        await deleteBackupFromDrive(googleToken, fileId);
-        alert("ลบไฟล์จาก Google Drive เรียบร้อยแล้วค่ะ");
-        loadDriveBackups(googleToken);
-      } catch (err: any) {
-        console.error(err);
-        alert("ลบล้มเหลว: " + err.message);
+    setConfirmDialog({
+      isOpen: true,
+      title: "ยืนยันการลบไฟล์สำรอง",
+      message: `⚠️ ต้องการลบไฟล์สำรอง "${fileName}" ออกจาก Google Drive ถาวรใช่หรือไม่?`,
+      confirmLabel: "ลบไฟล์",
+      cancelLabel: "ยกเลิก",
+      isDestructive: true,
+      onConfirm: async () => {
+        return withLoading(async () => {
+          try {
+            await deleteBackupFromDrive(googleToken, fileId);
+            setFeedbackModal({
+              isOpen: true,
+              title: "ลบไฟล์สำเร็จ",
+              message: "ลบไฟล์จาก Google Drive เรียบร้อยแล้วค่ะ",
+              type: "success"
+            });
+            loadDriveBackups(googleToken);
+          } catch (err: any) {
+            handleDriveAuthError(err);
+          }
+        }, "กำลังลบไฟล์สำรองออกจาก Google Drive...");
       }
-    }, "กำลังลบไฟล์สำรองออกจาก Google Drive...");
+    });
   };
 
   // Password reset resolver states
@@ -1107,20 +1287,36 @@ export default function AdminPanel({
   };
 
   const handleDeleteBillsCycle = async () => {
-    if (!window.confirm(`⚠️ คำเตือนสำคัญ!\n\nคุณกำลังจะทำการ "ลบบิลทั้งหมด" ของรอบเดือน ${getThaiMonthName(billMonth)} พ.ศ. ${billYear} ใช่หรือไม่?\n\nการดำเนินการนี้จะลบบิลของสมาชิกทุกคนในรอบเดือนนี้ และจะเคลียร์ข้อมูลการโอนเงิน/สลิปของเดือนนี้ที่ยังไม่ได้รับอนุมัติออกไปด้วย กรุณาตรวจสอบให้มั่นใจก่อนกดยืนยัน!`)) {
-      return;
-    }
-    
-    setIsDeletingBills(true);
-    try {
-      const res = await onDeleteMonthlyBills(billMonth, billYear) as { deletedCount?: number };
-      alert(`ลบบิลรอบเดือน ${getThaiMonthName(billMonth)} พ.ศ. ${billYear} สำเร็จเรียบร้อยแล้วค่ะ! (ลบจำนวน ${res?.deletedCount || 0} บิล)`);
-    } catch (err: any) {
-      console.error(err);
-      alert("ไม่สามารถลบบิลรอบนี้ได้: " + (err.message || String(err)));
-    } finally {
-      setIsDeletingBills(false);
-    }
+    setConfirmDialog({
+      isOpen: true,
+      title: "ยืนยันการลบบิลทั้งรอบเดือน",
+      message: `⚠️ คำเตือนสำคัญ!\n\nคุณกำลังจะทำการ "ลบบิลทั้งหมด" ของรอบเดือน ${getThaiMonthName(billMonth)} พ.ศ. ${billYear} ใช่หรือไม่?\n\nการดำเนินการนี้จะลบบิลของสมาชิกทุกคนในรอบเดือนนี้ และจะเคลียร์ข้อมูลการโอนเงิน/สลิปของเดือนนี้ที่ยังไม่ได้รับอนุมัติออกไปด้วย กรุณาตรวจสอบให้มั่นใจก่อนกดยืนยัน!`,
+      confirmLabel: "ยืนยันลบบิลทั้งรอบ",
+      cancelLabel: "ยกเลิก",
+      isDestructive: true,
+      onConfirm: async () => {
+        setIsDeletingBills(true);
+        try {
+          const res = await onDeleteMonthlyBills(billMonth, billYear) as { deletedCount?: number };
+          setFeedbackModal({
+            isOpen: true,
+            title: "ลบบิลสำเร็จ 🎉",
+            message: `ลบบิลรอบเดือน ${getThaiMonthName(billMonth)} พ.ศ. ${billYear} สำเร็จเรียบร้อยแล้วค่ะ! (ลบจำนวน ${res?.deletedCount || 0} บิล)`,
+            type: "success"
+          });
+        } catch (err: any) {
+          console.error(err);
+          setFeedbackModal({
+            isOpen: true,
+            title: "เกิดข้อผิดพลาด",
+            message: "ไม่สามารถลบบิลรอบนี้ได้: " + (err.message || String(err)),
+            type: "error"
+          });
+        } finally {
+          setIsDeletingBills(false);
+        }
+      }
+    });
   };
 
   const handleSaveSettings = async (e: React.FormEvent) => {
@@ -1128,29 +1324,52 @@ export default function AdminPanel({
     setIsUpdatingSettings(true);
     try {
       await onUpdateSettings(setFundName, setMonthlyFee, setPromptpayNumber, setPromptpayName, promptpayQrUrl, setBankName);
-      alert("บันทึกการตั้งค่าระบบกองทุนหลักสำเร็จ");
-    } catch (err) {
+      setFeedbackModal({
+        isOpen: true,
+        title: "บันทึกสำเร็จ 🎉",
+        message: "บันทึกการตั้งค่าระบบกองทุนหลักสำเร็จเรียบร้อยแล้วค่ะ",
+        type: "success"
+      });
+    } catch (err: any) {
       console.error(err);
+      setFeedbackModal({
+        isOpen: true,
+        title: "เกิดข้อผิดพลาด",
+        message: err.message || "ไม่สามารถบันทึกการตั้งค่าได้",
+        type: "error"
+      });
     } finally {
       setIsUpdatingSettings(false);
     }
   };
 
   const handleResolvePasswordReset = async (resetId: string, studentName: string) => {
-    if (!confirm(`คุณต้องการรีเซ็ตรหัสผ่านของ ${studentName} กลับไปเป็นค่าเริ่มต้น "123456" ใช่หรือไม่?`)) {
-      return;
-    }
-    setResolvingResetId(resetId);
-    setResetSuccessMsg(null);
-    try {
-      await onResolveResetPassword(resetId);
-      setResetSuccessMsg(`รีเซ็ตรหัสผ่านของคุณ ${studentName} เป็น "123456" สำเร็จเรียบร้อยแล้วค่ะ! 🔑`);
-      setTimeout(() => setResetSuccessMsg(null), 5000);
-    } catch (err: any) {
-      alert("เกิดข้อผิดพลาด: " + err.message);
-    } finally {
-      setResolvingResetId(null);
-    }
+    setConfirmDialog({
+      isOpen: true,
+      title: "ยืนยันการรีเซ็ตรหัสผ่าน",
+      message: `คุณต้องการรีเซ็ตรหัสผ่านของ ${studentName} กลับไปเป็นค่าเริ่มต้น "123456" ใช่หรือไม่?`,
+      confirmLabel: "รีเซ็ตรหัสผ่าน",
+      cancelLabel: "ยกเลิก",
+      isDestructive: false,
+      onConfirm: async () => {
+        setResolvingResetId(resetId);
+        setResetSuccessMsg(null);
+        try {
+          await onResolveResetPassword(resetId);
+          setResetSuccessMsg(`รีเซ็ตรหัสผ่านของคุณ ${studentName} เป็น "123456" สำเร็จเรียบร้อยแล้วค่ะ! 🔑`);
+          setTimeout(() => setResetSuccessMsg(null), 5000);
+        } catch (err: any) {
+          setFeedbackModal({
+            isOpen: true,
+            title: "เกิดข้อผิดพลาด",
+            message: err.message || "ไม่สามารถรีเซ็ตรหัสผ่านได้",
+            type: "error"
+          });
+        } finally {
+          setResolvingResetId(null);
+        }
+      }
+    });
   };
 
   return (
@@ -1265,12 +1484,11 @@ export default function AdminPanel({
               </button>
               <button
                 type="button"
-                disabled={isPurgingBase64}
-                onClick={handlePurgeBase64Slips}
-                className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200/60 font-bold text-xs px-3.5 py-2 rounded-xl flex items-center gap-1.5 transition-all shadow-sm cursor-pointer disabled:opacity-50"
-                title="ลบไฟล์รูปภาพ Base64 ที่ตกค้างใน DB เพื่อให้ความจุฐานข้อมูลโล่ง 100%"
+                onClick={handleOpenPurgeSlipModal}
+                className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200/60 font-bold text-xs px-3.5 py-2 rounded-xl flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
+                title="จัดการและเคลียร์รูปภาพสลิป เพื่อประหยัดพื้นที่จัดเก็บฐานข้อมูล"
               >
-                <Trash2 size={14} /> {isPurgingBase64 ? "กำลังเคลียร์..." : "🧹 เคลียร์สลิป Base64 ใน DB"}
+                <Trash2 size={14} /> 🧹 จัดการ & เคลียร์สลิป
               </button>
             </div>
           </div>
@@ -1308,6 +1526,7 @@ export default function AdminPanel({
               <option value="drive">☁️ อยู่บน Google Drive</option>
               <option value="db">💾 เก็บในฐานข้อมูล DB (Base64)</option>
               <option value="cash">💵 ชำระด้วยเงินสด (ไม่มีรูป)</option>
+              <option value="deleted">🧹 เคลียร์รูปแล้ว (ประวัติยังอยู่)</option>
             </select>
           </div>
 
@@ -1318,10 +1537,12 @@ export default function AdminPanel({
               
               const isDrive = p.slipUrl?.includes("google_drive:") || p.slipUrl?.includes("drive.google.com");
               const isCash = p.slipUrl === "cash";
+              const isDeleted = p.slipUrl === "deleted";
               const matchesStorage = slipGalleryStorageFilter === "all"
                 || (slipGalleryStorageFilter === "drive" && isDrive)
-                || (slipGalleryStorageFilter === "db" && !isDrive && !isCash && p.slipUrl)
-                || (slipGalleryStorageFilter === "cash" && isCash);
+                || (slipGalleryStorageFilter === "db" && !isDrive && !isCash && !isDeleted && p.slipUrl)
+                || (slipGalleryStorageFilter === "cash" && isCash)
+                || (slipGalleryStorageFilter === "deleted" && isDeleted);
 
               const student = users.find(u => u.id === p.userId);
               const searchLower = slipGallerySearch.toLowerCase();
@@ -1355,11 +1576,13 @@ export default function AdminPanel({
                     const bill = monthlyBills.find(b => b.id === p.billId);
                     const isDrive = p.slipUrl?.includes("google_drive:") || p.slipUrl?.includes("drive.google.com");
                     const isCash = p.slipUrl === "cash";
+                    const isDeleted = p.slipUrl === "deleted";
 
                     return (
                       <div
                         key={p.id}
-                        className="bg-slate-50 hover:bg-slate-100/80 border border-slate-200 rounded-2xl p-4 transition-all shadow-sm space-y-3 flex flex-col justify-between"
+                        onClick={() => setViewingSlipPayment(p)}
+                        className="bg-slate-50 hover:bg-slate-100/80 border border-slate-200 rounded-2xl p-4 transition-all shadow-sm space-y-3 flex flex-col justify-between cursor-pointer"
                       >
                         <div className="space-y-2">
                           {/* Student Header */}
@@ -1386,6 +1609,12 @@ export default function AdminPanel({
                                 <span className="text-2xl">💵</span>
                                 <p className="text-[10px] text-slate-500 font-bold mt-1">ชำระด้วยเงินสดแก่เหรัญญิก</p>
                               </div>
+                            ) : isDeleted ? (
+                              <div className="text-center p-4">
+                                <span className="text-2xl">🧹</span>
+                                <p className="text-[10px] text-slate-600 font-bold mt-1">เคลียร์รูปสลิปแล้ว</p>
+                                <p className="text-[9px] text-slate-400">ประวัติการเงินคงอยู่ครบ 100%</p>
+                              </div>
                             ) : p.slipUrl ? (
                               <>
                                 <img
@@ -1396,7 +1625,10 @@ export default function AdminPanel({
                                 <div className="absolute inset-0 bg-slate-900/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                                   <button
                                     type="button"
-                                    onClick={() => setViewingSlipPayment(p)}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setViewingSlipPayment(p);
+                                    }}
                                     className="bg-white/90 hover:bg-white text-slate-800 font-bold text-[11px] px-3 py-1.5 rounded-xl shadow-lg flex items-center gap-1 cursor-pointer"
                                   >
                                     <Eye size={13} /> ดูรูปสลิปเต็ม
@@ -1411,6 +1643,8 @@ export default function AdminPanel({
                             <div className="absolute top-2 left-2">
                               {isCash ? (
                                 <span className="bg-emerald-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow">💵 เงินสด</span>
+                              ) : isDeleted ? (
+                                <span className="bg-slate-500 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow">🧹 เคลียร์รูปแล้ว</span>
                               ) : isDrive ? (
                                 <span className="bg-blue-600 text-white text-[9px] font-bold px-1.5 py-0.5 rounded shadow flex items-center gap-1">
                                   <Cloud size={10} /> Google Drive
@@ -2567,47 +2801,42 @@ export default function AdminPanel({
             </div>
 
 
-            {/* Google Drive Status */}
-            <div className="p-3 rounded-2xl border border-slate-100 bg-slate-50/50 space-y-1 text-xs flex flex-col justify-between">
+            {/* Local Storage Slips Download & DB Optimizer */}
+            <div className="p-3 rounded-2xl border border-indigo-100 bg-indigo-50/40 space-y-2 text-xs flex flex-col justify-between">
               <div>
-                <span className="text-[10px] text-slate-400 font-bold uppercase block">สถานะคลังภาพ Google Drive</span>
-                {diag?.googleDrive?.connected ? (
-                  <div className="flex items-center gap-1.5 text-xs text-emerald-600 font-bold">
-                    <Cloud size={14} className="text-emerald-500 animate-pulse" /> เชื่อมต่อคลังภาพสำเร็จ (Service Account)
-                  </div>
-                ) : googleUser ? (
-                  <div className="flex items-center gap-1.5 text-xs text-emerald-600 font-bold">
-                    <Cloud size={14} className="text-emerald-500 animate-pulse" /> เชื่อมต่อผ่านบัญชี Google แล้ว ({googleUser.email})
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-1.5 text-xs text-rose-500 font-bold">
-                    <Cloud size={14} className="text-rose-500" /> ขัดข้อง: {diag?.googleDrive?.error || "ยังไม่ได้เชื่อมต่อ"}
-                  </div>
-                )}
-                <p className="text-[9px] text-slate-400 mt-1 truncate max-w-[200px]" title={diag?.googleDrive?.rootFolderLink}>
-                  โฟลเดอร์หลัก: {diag?.googleDrive?.rootFolderLink ? "กำหนดลิงก์แล้ว" : "ไม่ได้กำหนดลิงก์"}
+                <span className="text-[10px] text-indigo-700 font-bold uppercase block flex items-center gap-1">
+                  <Download size={12} /> ระบบดาวน์โหลดสลิปทั้งหมด & บริหาร DB
+                </span>
+                <div className="flex items-center gap-1.5 text-xs text-indigo-900 font-bold mt-1">
+                  <CheckCircle2 size={14} className="text-emerald-500" /> โหมดดาวน์โหลดสลิปลงเครื่องคอมพิวเตอร์ (Direct Download)
+                </div>
+                <p className="text-[10px] text-slate-600 mt-1">
+                  สลิปและหลักฐานสะสมในระบบ: <span className="text-indigo-700 font-mono font-bold">{diag?.counts?.payments || 0}</span> รายการ
                 </p>
-                <p className="text-[9px] mt-0.5">
-                  บัญชีผู้ใช้: {googleUser ? (
-                    <span className="text-emerald-600 font-bold">เชื่อมต่อแล้ว ({googleUser.email})</span>
-                  ) : (
-                    <span className="text-slate-500">ยังไม่ได้ล็อกอิน Google</span>
-                  )}
-                </p>
-                <p className="text-[9px] text-slate-500 font-bold mt-0.5">
-                  สลิปสะสมในระบบ: <span className="text-indigo-600 font-mono">{diag?.googleDrive?.pendingMigrationCount || 0}</span> รูป (รออัปโหลดขึ้นคลาวด์)
+                <p className="text-[9px] text-slate-500 font-medium mt-0.5">
+                  💡 ดาวน์โหลดรูปสลิปและใบเสร็จทั้งหมดลงเครื่อง (.zip) แล้วกดเคลียร์รูปเพื่อประหยัดพื้นที่ DB แอปไม่เต็ม ไม่ค้างตลอด 2.5 ปี+
                 </p>
               </div>
-              <div className="pt-2 border-t border-slate-200/60 mt-2">
+              <div className="pt-2 border-t border-indigo-100 flex flex-col gap-1.5 mt-2">
                 <button
                   type="button"
-                  onClick={handleMigrateImagesToDrive}
-                  disabled={isMigratingImages || (!diag?.googleDrive?.connected && !googleUser && !googleToken) || !diag?.googleDrive?.pendingMigrationCount}
-                  className="w-full py-1.5 px-2 rounded-xl bg-indigo-50 hover:bg-indigo-100 disabled:bg-slate-100 disabled:text-slate-400 text-indigo-700 font-bold text-[10px] flex items-center justify-center gap-1 transition-all shadow-sm cursor-pointer disabled:cursor-not-allowed"
-                  title="ย้ายรูปภาพสลิปที่เก็บในฐานข้อมูล Supabase ทั้งหมดขึ้นไปจัดหมวดหมู่ใน Google Drive"
+                  onClick={handleDownloadAllSlipsZip}
+                  disabled={isDownloadingSlipsZip}
+                  className="w-full py-2 px-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[10px] flex items-center justify-center gap-1.5 transition-all shadow-sm cursor-pointer disabled:bg-slate-300"
+                  title="ดาวน์โหลดรูปภาพสลิปค่าบำรุงและหลักฐานตลาดทั้งหมดเป็นไฟล์ ZIP ลงเครื่องคอมพิวเตอร์"
                 >
-                  <Upload size={11} className={isMigratingImages ? "animate-bounce" : ""} />
-                  {isMigratingImages ? "กำลังย้ายสลิป..." : `☁️ ย้าย ${diag?.googleDrive?.pendingMigrationCount || 0} รูปขึ้น Google Drive`}
+                  <Download size={12} className={isDownloadingSlipsZip ? "animate-bounce" : ""} />
+                  {isDownloadingSlipsZip ? "กำลังบีบอัดไฟล์ ZIP..." : "📥 ดาวน์โหลดรูปสลิปทั้งหมดลงเครื่อง (.zip)"}
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePurgeBase64Slips}
+                  disabled={isPurgingSlips}
+                  className="w-full py-1.5 px-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-[10px] flex items-center justify-center gap-1.5 transition-all border border-rose-200 cursor-pointer disabled:bg-slate-100"
+                  title="เคลียร์รูปสลิปออกจากฐานข้อมูลหลังจากเซฟลงเครื่องแล้ว เพื่อประหยัดพื้นที่ DB 100%"
+                >
+                  <Trash2 size={11} className={isPurgingSlips ? "animate-spin" : ""} />
+                  {isPurgingSlips ? "กำลังเคลียร์พื้นที่..." : "🧹 เคลียร์รูปภาพออกจากระบบ (Purge Storage)"}
                 </button>
               </div>
             </div>
@@ -2884,8 +3113,29 @@ export default function AdminPanel({
             </div>
 
             {driveError && (
-              <div className="p-3 bg-rose-50 border border-rose-100 text-rose-600 rounded-xl text-[11px] flex items-center gap-2">
-                <AlertCircle size={14} /> {driveError}
+              <div className="p-3.5 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-in fade-in">
+                <div className="flex items-center gap-2">
+                  <AlertCircle size={16} className="shrink-0 text-rose-600" />
+                  <span>{driveError}</span>
+                </div>
+                <div className="flex items-center gap-2 self-end sm:self-auto shrink-0">
+                  <button
+                    type="button"
+                    onClick={handleConnectGoogle}
+                    disabled={isConnectingGoogle}
+                    className="px-3 py-1.5 bg-rose-600 hover:bg-rose-700 disabled:bg-rose-300 text-white rounded-lg text-xs font-bold transition-all flex items-center gap-1.5 shadow-sm"
+                  >
+                    <RefreshCw size={12} className={isConnectingGoogle ? "animate-spin" : ""} />
+                    {isConnectingGoogle ? "กำลังเชื่อมต่อ..." : "เชื่อมต่อ Google Drive ใหม่"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDriveError(null)}
+                    className="px-2 py-1 text-slate-400 hover:text-slate-600 text-xs font-bold transition-colors"
+                  >
+                    ปิด
+                  </button>
+                </div>
               </div>
             )}
 
@@ -3180,7 +3430,7 @@ export default function AdminPanel({
 
     {/* Printable PDF Report Modal */}
     {showPrintModal && printSummary && (
-      <div className="fixed inset-0 bg-slate-900/85 backdrop-blur-sm z-50 overflow-y-auto flex flex-col items-center p-0 md:p-6 print-modal-container">
+      <div className="fixed inset-0 bg-slate-900/95 backdrop-blur-md z-50 overflow-y-auto flex flex-col items-center p-0 md:p-6 print-modal-container">
         {/* Action Bar at the Top */}
         <div className="sticky top-0 w-full max-w-4xl bg-slate-800 text-white p-4 shadow-xl flex items-center justify-between z-10 md:rounded-t-3xl border-b border-slate-700 no-print">
           <div className="space-y-0.5">
@@ -3211,7 +3461,7 @@ export default function AdminPanel({
         </div>
 
         {/* Printable Sheet (Standard A4 layout, White paper-like design) */}
-        <div className="bg-white text-slate-900 w-full max-w-4xl min-h-[1120px] p-8 md:p-12 shadow-2xl md:rounded-b-3xl border-x border-b border-slate-200 print-area relative flex flex-col justify-between font-sans">
+        <div className="bg-white text-slate-900 w-full max-w-4xl min-h-[1120px] p-8 md:p-12 shadow-2xl md:rounded-b-3xl border-x border-b border-slate-200 print-area relative flex flex-col justify-between font-sans isolate z-10">
           
           {/* Custom print-only CSS injection to ensure only this block prints */}
           <style dangerouslySetInnerHTML={{__html: `
@@ -3228,8 +3478,17 @@ export default function AdminPanel({
                 -webkit-print-color-adjust: exact !important;
                 print-color-adjust: exact !important;
               }
-              .no-print {
+              /* Hide all background elements during print */
+              body * {
+                visibility: hidden !important;
+              }
+              /* Reveal only print modal container and its contents */
+              .print-modal-container, .print-modal-container * {
+                visibility: visible !important;
+              }
+              .no-print, .no-print * {
                 display: none !important;
+                visibility: hidden !important;
               }
               .print-modal-container {
                 position: absolute !important;
@@ -3262,19 +3521,26 @@ export default function AdminPanel({
 
           <div className="space-y-6">
             {/* Document Header */}
-            <div className="border-b-4 border-slate-800 pb-5 text-center relative">
-              <span className="absolute left-0 top-0 text-[10px] uppercase font-mono tracking-widest text-slate-400 border border-slate-300 px-2 py-1 rounded">
-                เอกสารรายงานภายใน
-              </span>
-              <h1 className="text-xl md:text-2xl font-bold tracking-tight text-slate-900 font-sans">
-                รายงานสรุปฐานะทางการเงินและรายละเอียดรายรับ-รายจ่าย
-              </h1>
-              <p className="text-sm font-semibold text-slate-600 mt-1">
-                ประจำงวดเดือน {getThaiMonthName(printSummary.month)} ประจำปี พ.ศ. {printSummary.year}
-              </p>
-              <p className="text-[11px] text-slate-400 mt-0.5">
-                ระบบบัญชีกองทุนกลางสวัสดิการและกิจกรรมนักศึกษารุ่น • {settings.fundName || "เงินเก็บTns รุ่น06"}
-              </p>
+            <div className="border-b-4 border-slate-800 pb-5 space-y-3">
+              <div className="flex justify-between items-center text-xs font-mono">
+                <span className="text-[10px] uppercase tracking-widest text-slate-600 border border-slate-300 px-2.5 py-1 rounded-full bg-slate-50 font-bold">
+                  เอกสารรายงานภายใน
+                </span>
+                <span className="text-[10px] text-slate-500 font-semibold">
+                  รหัส: REP-{printSummary.month}-{printSummary.year}-TRANS
+                </span>
+              </div>
+              <div className="text-center space-y-1">
+                <h1 className="text-xl md:text-2xl font-bold tracking-tight text-slate-900 font-sans">
+                  รายงานสรุปฐานะทางการเงินและรายละเอียดรายรับ-รายจ่าย
+                </h1>
+                <p className="text-sm font-semibold text-slate-600">
+                  ประจำงวดเดือน {getThaiMonthName(printSummary.month)} ประจำปี พ.ศ. {printSummary.year}
+                </p>
+                <p className="text-[11px] text-slate-400">
+                  ระบบบัญชีกองทุนกลางสวัสดิการและกิจกรรมนักศึกษารุ่น • {settings.fundName || "เงินเก็บTns รุ่น06"}
+                </p>
+              </div>
             </div>
 
             {/* Document Meta Info Table */}
@@ -3437,140 +3703,7 @@ export default function AdminPanel({
       </div>
     )}
 
-    {/* Google Drive Migration Custom Modal */}
-    {showMigrationModal && (
-      <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in">
-        <div className="bg-white rounded-3xl shadow-2xl border border-slate-100 max-w-lg w-full p-6 space-y-5 relative overflow-hidden">
-          {/* Header */}
-          <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-            <div className="flex items-center gap-2.5">
-              <div className="p-2.5 bg-indigo-50 text-indigo-600 rounded-2xl">
-                <Cloud size={22} className={isMigratingImages ? "animate-bounce" : ""} />
-              </div>
-              <div>
-                <h3 className="text-base font-bold text-slate-800">ย้ายสลิปชำระเงินขึ้น Google Drive</h3>
-                <p className="text-xs text-slate-500">ลดขนาดพื้นที่คลังข้อมูลและจัดระเบียบรูปภาพสลิป</p>
-              </div>
-            </div>
-            {!isMigratingImages && (
-              <button
-                type="button"
-                onClick={() => setShowMigrationModal(false)}
-                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100 transition-colors cursor-pointer"
-              >
-                <X size={18} />
-              </button>
-            )}
-          </div>
 
-          {/* Body Content */}
-          {migrationModalSuccess ? (
-            <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-100 text-emerald-800 space-y-2">
-              <div className="flex items-center gap-2 font-bold text-sm">
-                <CheckCircle2 size={18} className="text-emerald-600" />
-                <span>ดำเนินการย้ายสลิปสำเร็จ!</span>
-              </div>
-              <p className="text-xs text-emerald-700 leading-relaxed">
-                {migrationModalSuccess}
-              </p>
-              {migrationResult && migrationResult.errors.length > 0 && (
-                <div className="text-[11px] text-amber-700 bg-amber-50 p-2.5 rounded-xl mt-2 border border-amber-200">
-                  ⚠️ พบบางไฟล์ที่มีคำเตือน: {migrationResult.errors.join(", ")}
-                </div>
-              )}
-            </div>
-          ) : migrationModalError ? (
-            <div className="p-4 rounded-2xl bg-rose-50 border border-rose-100 text-rose-800 space-y-2">
-              <div className="flex items-center gap-2 font-bold text-sm">
-                <AlertCircle size={18} className="text-rose-600" />
-                <span>เกิดข้อผิดพลาดในการย้ายสลิป</span>
-              </div>
-              <p className="text-xs text-rose-700 leading-relaxed">
-                {migrationModalError}
-              </p>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <div className="p-4 rounded-2xl bg-indigo-50/60 border border-indigo-100/80 text-indigo-950 space-y-2 text-xs">
-                <div className="flex justify-between items-center font-bold">
-                  <span className="text-slate-600">สลิปสะสมรอการย้าย:</span>
-                  <span className="text-indigo-600 text-sm font-mono">{diag?.googleDrive?.pendingMigrationCount || 0} รูป</span>
-                </div>
-                <div className="flex justify-between items-center text-[11px] border-t border-indigo-100 pt-2">
-                  <span className="text-slate-500">บัญชีที่จะใช้จัดเก็บ:</span>
-                  <span className="font-semibold text-slate-700">
-                    {googleUser ? `Google Account (${googleUser.email})` : "Google Drive Service Connection"}
-                  </span>
-                </div>
-              </div>
-
-              <p className="text-xs text-slate-500 leading-relaxed">
-                สลิปภาพถ่ายดิบทั้งหมดจะถูกย้ายขึ้นไปเก็บเป็นไฟล์รูปภาพใน Google Drive แล้วเปลี่ยนรหัสสลิปในฐานข้อมูลเป็นลิงก์ URL ซึ่งช่วยประหยัดพื้นที่คลังข้อมูลได้มากกว่า 95%
-              </p>
-
-              {!googleUser && (
-                <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80 flex items-center justify-between gap-2">
-                  <div className="text-[11px] text-slate-600">
-                    <span className="font-bold block text-slate-700">ต้องการจัดเก็บใน Google Drive ส่วนตัว?</span>
-                    ท่านสามารถล็อกอินบัญชี Google ได้ตามต้องการ
-                  </div>
-                  <button
-                    type="button"
-                    onClick={handleConnectGoogle}
-                    disabled={isConnectingGoogle || isMigratingImages}
-                    className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-bold rounded-xl shadow-sm whitespace-nowrap transition-all flex items-center gap-1 cursor-pointer"
-                  >
-                    <LogIn size={13} /> {isConnectingGoogle ? "กำลังเชื่อมต่อ..." : "ล็อกอิน Google"}
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Action Buttons */}
-          <div className="pt-3 border-t border-slate-100 flex items-center justify-end gap-2.5">
-            {migrationModalSuccess ? (
-              <button
-                type="button"
-                onClick={() => setShowMigrationModal(false)}
-                className="px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-2xl shadow-md transition-all cursor-pointer"
-              >
-                ตกลง (ปิดหน้าต่าง)
-              </button>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setShowMigrationModal(false)}
-                  disabled={isMigratingImages}
-                  className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 text-slate-600 font-bold text-xs rounded-2xl transition-all cursor-pointer"
-                >
-                  ยกเลิก
-                </button>
-                <button
-                  type="button"
-                  onClick={executeImageMigration}
-                  disabled={isMigratingImages || (!diag?.googleDrive?.pendingMigrationCount)}
-                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-bold text-xs rounded-2xl shadow-md transition-all flex items-center gap-2 cursor-pointer disabled:cursor-not-allowed"
-                >
-                  {isMigratingImages ? (
-                    <>
-                      <Loader2 size={15} className="animate-spin" />
-                      <span>กำลังย้ายสลิปขึ้นคลาวด์...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Upload size={15} />
-                      <span>เริ่มย้าย {diag?.googleDrive?.pendingMigrationCount || 0} รูปทันที</span>
-                    </>
-                  )}
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-      </div>
-    )}
 
     {/* Full Historical Slip Viewer Modal */}
     {viewingSlipPayment && (
@@ -3601,6 +3734,7 @@ export default function AdminPanel({
             const reviewer = users.find(u => u.id === viewingSlipPayment.reviewedBy);
             const isDrive = viewingSlipPayment.slipUrl?.includes("google_drive:") || viewingSlipPayment.slipUrl?.includes("drive.google.com");
             const isCash = viewingSlipPayment.slipUrl === "cash";
+            const isDeleted = viewingSlipPayment.slipUrl === "deleted";
 
             return (
               <div className="space-y-4">
@@ -3624,7 +3758,7 @@ export default function AdminPanel({
                   <div className="flex items-center justify-between text-xs">
                     <span className="font-bold text-slate-700">🖼️ รูปสลิปหลักฐานโอนเงิน</span>
                     <span className="text-[10px] text-slate-500 font-medium">
-                      {isCash ? "💵 ชำระเงินสด" : isDrive ? "☁️ จัดเก็บอยู่บน Google Drive" : "💾 จัดเก็บในฐานข้อมูล DB"}
+                      {isCash ? "💵 ชำระเงินสด" : isDeleted ? "🧹 เคลียร์รูปแล้ว (ประวัติคงอยู่ครบ)" : isDrive ? "☁️ จัดเก็บอยู่บน Google Drive" : "💾 จัดเก็บในฐานข้อมูล DB"}
                     </span>
                   </div>
 
@@ -3634,6 +3768,14 @@ export default function AdminPanel({
                         <span className="text-4xl">💵</span>
                         <h4 className="font-bold text-slate-700 text-sm">รายการนี้เป็นการชำระด้วยเงินสดแก่เหรัญญิก</h4>
                         <p className="text-xs text-slate-500">ไม่มีไฟล์รูปสลิปแนบ เหรัญญิกเป็นผู้รับเงินสดและกดบันทึกเข้าระบบ</p>
+                      </div>
+                    ) : isDeleted ? (
+                      <div className="text-center p-6 space-y-2">
+                        <span className="text-4xl">🧹</span>
+                        <h4 className="font-bold text-slate-700 text-sm">ไฟล์รูปภาพสลิปถูกเคลียร์เรียบร้อยแล้ว</h4>
+                        <p className="text-xs text-slate-500 max-w-sm mx-auto">
+                          รูปภาพสลิปถูกลบออกจากคลังจัดเก็บเพื่อประหยัดพื้นที่ โดยข้อมูลยอดเงิน วันที่ชำระ เลขที่ใบเสร็จ และประวัติการเงินของสมาชิกยังคงอยู่ครบถ้วน 100%
+                        </p>
                       </div>
                     ) : viewingSlipPayment.slipUrl ? (
                       <img
@@ -3648,28 +3790,264 @@ export default function AdminPanel({
                 </div>
 
                 {/* Action Buttons */}
-                <div className="flex justify-end gap-2 pt-2">
-                  {viewingSlipPayment.slipUrl && !isCash && (
-                    <a
-                      href={viewingSlipPayment.slipUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-md flex items-center gap-1.5 transition-all"
+                <div className="flex flex-wrap justify-between items-center gap-2 pt-2 border-t border-slate-150">
+                  <div>
+                    {viewingSlipPayment.slipUrl && viewingSlipPayment.slipUrl !== "cash" && viewingSlipPayment.slipUrl !== "deleted" && (
+                      <button
+                        type="button"
+                        onClick={() => handleClearSingleSlip(viewingSlipPayment.id)}
+                        className="bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200/60 font-bold text-xs px-3.5 py-2 rounded-xl transition-all cursor-pointer flex items-center gap-1.5"
+                      >
+                        <Trash2 size={13} /> ลบ/เคลียร์รูปสลิปนี้
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {viewingSlipPayment.slipUrl && !isCash && viewingSlipPayment.slipUrl !== "deleted" && (
+                      <a
+                        href={viewingSlipPayment.slipUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs px-4 py-2.5 rounded-xl shadow-md flex items-center gap-1.5 transition-all"
+                      >
+                        <Eye size={14} /> เปิดรูปสลิปขนาดใหญ่ในแท็บใหม่
+                      </a>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setViewingSlipPayment(null)}
+                      className="bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold text-xs px-4 py-2.5 rounded-xl transition-all cursor-pointer"
                     >
-                      <Eye size={14} /> เปิดรูปสลิปขนาดใหญ่ในแท็บใหม่
-                    </a>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => setViewingSlipPayment(null)}
-                    className="bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold text-xs px-4 py-2.5 rounded-xl transition-all cursor-pointer"
-                  >
-                    ปิดหน้าต่าง
-                  </button>
+                      ปิดหน้าต่าง
+                    </button>
+                  </div>
                 </div>
               </div>
             );
           })()}
+        </div>
+      </div>
+    )}
+
+    {/* Purge / Clear Slips Management Modal */}
+    {showPurgeSlipModal && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
+        <div className="bg-white rounded-3xl shadow-2xl max-w-lg w-full p-6 space-y-5 border border-slate-100 max-h-[90vh] overflow-y-auto">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <div className="flex items-center gap-2.5">
+              <div className="p-2.5 bg-rose-50 text-rose-600 rounded-2xl">
+                <Trash2 size={22} />
+              </div>
+              <div>
+                <h3 className="font-bold text-slate-800 text-base">จัดการและเคลียร์รูปภาพสลิป</h3>
+                <p className="text-xs text-slate-500">เลือกรูปแบบการเคลียร์รูปภาพเพื่อประหยัดพื้นที่จัดเก็บ</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowPurgeSlipModal(false)}
+              className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100 transition-all cursor-pointer"
+            >
+              <X size={18} />
+            </button>
+          </div>
+
+          <div className="space-y-3">
+            {/* Option 1: Base64 Purge */}
+            <div 
+              onClick={() => setPurgeSlipMode("base64")}
+              className={`p-4 rounded-2xl border-2 transition-all cursor-pointer ${
+                purgeSlipMode === "base64" 
+                  ? "border-rose-500 bg-rose-50/40" 
+                  : "border-slate-150 hover:border-slate-300 bg-white"
+              }`}
+            >
+              <div className="flex items-start gap-3">
+                <input
+                  type="radio"
+                  name="purgeMode"
+                  checked={purgeSlipMode === "base64"}
+                  onChange={() => setPurgeSlipMode("base64")}
+                  className="mt-1 accent-rose-600 cursor-pointer"
+                />
+                <div>
+                  <h4 className="font-bold text-slate-800 text-sm flex items-center gap-2">
+                    🧹 เคลียร์สลิป Base64 ใน DB
+                    <span className="bg-emerald-100 text-emerald-700 text-[10px] px-2 py-0.5 rounded-full font-bold">แนะนำ</span>
+                  </h4>
+                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                    ลบเฉพาะไฟล์รูป Base64 ดิบที่ยังตกค้างในฐานข้อมูลคลาวด์ DB เพื่อให้ความจุฐานข้อมูลโล่ง เบาหวิว และตอบสนองเร็ว 100% (สลิปที่ย้ายไป Google Drive แล้วและประวัติจะยังคงอยู่ครบถ้วน)
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Option 2: Slips older than 30 days */}
+            <div 
+              onClick={() => setPurgeSlipMode("older_30_days")}
+              className={`p-4 rounded-2xl border-2 transition-all cursor-pointer ${
+                purgeSlipMode === "older_30_days" 
+                  ? "border-rose-500 bg-rose-50/40" 
+                  : "border-slate-150 hover:border-slate-300 bg-white"
+              }`}
+            >
+              <div className="flex items-start gap-3">
+                <input
+                  type="radio"
+                  name="purgeMode"
+                  checked={purgeSlipMode === "older_30_days"}
+                  onChange={() => setPurgeSlipMode("older_30_days")}
+                  className="mt-1 accent-rose-600 cursor-pointer"
+                />
+                <div>
+                  <h4 className="font-bold text-slate-800 text-sm">
+                    ⏳ เคลียร์สลิปเก่าที่เกิน 30 วัน
+                  </h4>
+                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                    ลบรูปสลิปของรายการที่บันทึกเกิน 30 วันที่ผ่านการตรวจสอบเรียบร้อยแล้ว โดยบันทึกยอดเงิน เลขที่ใบเสร็จ และประวัติการเงินจะคงอยู่ครบ 100%
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Option 3: All slips */}
+            <div 
+              onClick={() => setPurgeSlipMode("all")}
+              className={`p-4 rounded-2xl border-2 transition-all cursor-pointer ${
+                purgeSlipMode === "all" 
+                  ? "border-rose-500 bg-rose-50/40" 
+                  : "border-slate-150 hover:border-slate-300 bg-white"
+              }`}
+            >
+              <div className="flex items-start gap-3">
+                <input
+                  type="radio"
+                  name="purgeMode"
+                  checked={purgeSlipMode === "all"}
+                  onChange={() => setPurgeSlipMode("all")}
+                  className="mt-1 accent-rose-600 cursor-pointer"
+                />
+                <div>
+                  <h4 className="font-bold text-slate-800 text-sm">
+                    🗑️ เคลียร์รูปภาพสลิปทั้งหมดในระบบ
+                  </h4>
+                  <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                    ลบรูปภาพสลิปทั้งหมดออกจากฐานข้อมูลเพื่อคืนพื้นที่สูงสุด ข้อมูลบัญชี รายรับ-รายจ่าย ประวัติสมาชิก และเลขใบเสร็จจะไม่ได้รับผลกระทบ
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3.5 text-xs text-amber-800 flex items-start gap-2.5">
+            <AlertTriangle size={18} className="shrink-0 text-amber-600 mt-0.5" />
+            <div className="space-y-0.5">
+              <span className="font-bold">ความปลอดภัยของข้อมูลบัญชี:</span>
+              <p className="text-amber-700 text-[11px] leading-relaxed">
+                การเคลียร์สลิปจะลบเฉพาะไฟล์รูปภาพหลักฐานเท่านั้น ประวัติการชำระเงิน ยอดเงิน เลขที่ใบเสร็จ วันที่ และสถานะการตรวจสอบจะยังคงอยู่ครบถ้วน 100%
+              </p>
+            </div>
+          </div>
+
+          <div className="flex justify-end gap-2.5 pt-2">
+            <button
+              type="button"
+              onClick={() => setShowPurgeSlipModal(false)}
+              disabled={isPurgingSlips}
+              className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-all cursor-pointer"
+            >
+              ยกเลิก
+            </button>
+            <button
+              type="button"
+              disabled={isPurgingSlips}
+              onClick={() => handleExecutePurgeSlips(purgeSlipMode)}
+              className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl transition-all shadow-md shadow-rose-200 flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              {isPurgingSlips ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" /> กำลังเคลียร์สลิป...
+                </>
+              ) : (
+                <>
+                  <Trash2 size={14} /> ยืนยันเคลียร์สลิป
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* In-App Confirmation Dialog */}
+    {confirmDialog && confirmDialog.isOpen && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
+        <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-6 space-y-4 border border-slate-150">
+          <div className="flex items-center gap-3">
+            <div className={`p-2.5 rounded-2xl ${confirmDialog.isDestructive ? "bg-rose-50 text-rose-600" : "bg-blue-50 text-blue-600"}`}>
+              {confirmDialog.isDestructive ? <AlertTriangle size={22} /> : <AlertCircle size={22} />}
+            </div>
+            <h3 className="font-bold text-slate-800 text-base">{confirmDialog.title}</h3>
+          </div>
+
+          <p className="text-xs text-slate-600 leading-relaxed whitespace-pre-line">
+            {confirmDialog.message}
+          </p>
+
+          <div className="flex justify-end gap-2.5 pt-2">
+            <button
+              type="button"
+              onClick={() => setConfirmDialog(null)}
+              className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-all cursor-pointer"
+            >
+              {confirmDialog.cancelLabel || "ยกเลิก"}
+            </button>
+            <button
+              type="button"
+              onClick={async () => {
+                const action = confirmDialog.onConfirm;
+                setConfirmDialog(null);
+                await action();
+              }}
+              className={`px-4 py-2 font-bold text-xs rounded-xl transition-all text-white shadow-md cursor-pointer ${
+                confirmDialog.isDestructive 
+                  ? "bg-rose-600 hover:bg-rose-700 shadow-rose-200" 
+                  : "bg-blue-600 hover:bg-blue-700 shadow-blue-200"
+              }`}
+            >
+              {confirmDialog.confirmLabel || "ยืนยัน"}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
+    {/* In-App Feedback/Notification Dialog */}
+    {feedbackModal && feedbackModal.isOpen && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in">
+        <div className="bg-white rounded-3xl shadow-2xl max-w-md w-full p-6 space-y-4 border border-slate-150 text-center">
+          <div className="mx-auto w-12 h-12 flex items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600">
+            {feedbackModal.type === "error" ? (
+              <XCircle size={28} className="text-rose-500" />
+            ) : (
+              <CheckCircle2 size={28} className="text-emerald-500" />
+            )}
+          </div>
+
+          <div className="space-y-1">
+            <h3 className="font-bold text-slate-800 text-base">{feedbackModal.title}</h3>
+            <p className="text-xs text-slate-600 leading-relaxed whitespace-pre-line">{feedbackModal.message}</p>
+          </div>
+
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => setFeedbackModal(null)}
+              className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs rounded-xl transition-all shadow-md cursor-pointer"
+            >
+              ตกลง
+            </button>
+          </div>
         </div>
       </div>
     )}

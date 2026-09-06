@@ -96,10 +96,14 @@ export const googleSignIn = async (): Promise<{ user: any; accessToken: string }
             photoURL: userInfo.picture || undefined
           };
 
+          const expiresInSec = Number(tokenResponse?.expires_in || 3500);
+          const expiresAt = Date.now() + expiresInSec * 1000;
+
           cachedAccessToken = accessToken;
           cachedUser = user;
           localStorage.setItem("gdrive_access_token", accessToken);
           localStorage.setItem("gdrive_user", JSON.stringify(user));
+          localStorage.setItem("gdrive_token_expires_at", String(expiresAt));
 
           return { user, accessToken };
         }
@@ -124,10 +128,12 @@ export const googleSignIn = async (): Promise<{ user: any; accessToken: string }
       photoURL: fbUser.photoURL || undefined
     };
 
+    const expiresAt = Date.now() + 3500 * 1000; // ~1 hour default
     cachedAccessToken = accessToken;
     cachedUser = user;
     localStorage.setItem("gdrive_access_token", accessToken);
     localStorage.setItem("gdrive_user", JSON.stringify(user));
+    localStorage.setItem("gdrive_token_expires_at", String(expiresAt));
 
     return { user, accessToken };
   } catch (error: any) {
@@ -144,11 +150,36 @@ export const googleSignIn = async (): Promise<{ user: any; accessToken: string }
   }
 };
 
+export const clearGoogleSession = () => {
+  cachedAccessToken = null;
+  cachedUser = null;
+  if (typeof window !== "undefined") {
+    localStorage.removeItem("gdrive_access_token");
+    localStorage.removeItem("gdrive_user");
+    localStorage.removeItem("gdrive_token_expires_at");
+  }
+};
+
 export const getAccessToken = (): string | null => {
-  return cachedAccessToken || (typeof window !== "undefined" ? localStorage.getItem("gdrive_access_token") : null);
+  if (typeof window !== "undefined") {
+    const expiresAt = localStorage.getItem("gdrive_token_expires_at");
+    if (expiresAt && Date.now() > Number(expiresAt)) {
+      clearGoogleSession();
+      return null;
+    }
+    return cachedAccessToken || localStorage.getItem("gdrive_access_token");
+  }
+  return cachedAccessToken;
 };
 
 export const getStoredUser = (): GoogleDriveUser | null => {
+  if (typeof window !== "undefined") {
+    const expiresAt = localStorage.getItem("gdrive_token_expires_at");
+    if (expiresAt && Date.now() > Number(expiresAt)) {
+      clearGoogleSession();
+      return null;
+    }
+  }
   if (cachedUser) return cachedUser;
   if (typeof window === "undefined") return null;
   try {
@@ -174,10 +205,5 @@ export const logoutGoogle = async () => {
   try {
     await auth.signOut();
   } catch {}
-  cachedAccessToken = null;
-  cachedUser = null;
-  if (typeof window !== "undefined") {
-    localStorage.removeItem("gdrive_access_token");
-    localStorage.removeItem("gdrive_user");
-  }
+  clearGoogleSession();
 };

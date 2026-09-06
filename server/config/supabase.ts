@@ -13,9 +13,16 @@ export const supabase: SupabaseClient = createClient(ENV.SUPABASE_URL, ENV.SUPAB
 export let dbConnected = false;
 export let dbSyncError = "";
 
-export async function testSupabaseConnection(retries = 3): Promise<boolean> {
+export async function testSupabaseConnection(retries = 1): Promise<boolean> {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
+      if (!ENV.SUPABASE_URL || !ENV.SUPABASE_SERVICE_KEY || ENV.SUPABASE_SERVICE_KEY.includes("your-supabase")) {
+        dbConnected = false;
+        dbSyncError = "Supabase credentials not configured in environment";
+        console.warn(`[Supabase] ⚠️ Notice: ${dbSyncError}. Running with fallback memory state.`);
+        return false;
+      }
+
       const { data, error } = await supabase.from("users").select("id").limit(1);
       if (error) throw error;
       dbConnected = true;
@@ -23,15 +30,10 @@ export async function testSupabaseConnection(retries = 3): Promise<boolean> {
       console.log("[Supabase] ✅ Connected successfully!");
       return true;
     } catch (err: unknown) {
-      const errMsg = err instanceof Error ? err.message : String(err);
+      const errMsg = (err as any)?.message || (err as any)?.error_description || (err instanceof Error ? err.message : (typeof err === "object" ? JSON.stringify(err) : String(err)));
       dbSyncError = errMsg || "Failed to connect to Supabase";
-      if (attempt < retries) {
-        console.warn(`[Supabase] ⚠️ Connection attempt ${attempt}/${retries} failed: ${dbSyncError}. Retrying in 2s...`);
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-      } else {
-        dbConnected = false;
-        console.error(`[Supabase] ❌ Connection failed after ${retries} attempts: ${dbSyncError}`);
-      }
+      dbConnected = false;
+      console.warn(`[Supabase] ⚠️ Supabase connection status: ${dbSyncError}. Using resilient state fallback.`);
     }
   }
   return false;

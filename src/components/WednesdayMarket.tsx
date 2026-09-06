@@ -131,7 +131,30 @@ export default function WednesdayMarket({
   const getAvailableCarryOvers = () => {
     return marketWeeks.filter(w => {
       const { carryForwardRemaining } = parseWeekNote(w.note);
-      return carryForwardRemaining > 0 && w.id !== selectedWeek?.id;
+      if (carryForwardRemaining <= 0 || w.id === selectedWeek?.id) return false;
+
+      // Check if another week in marketWeeks has already consumed/absorbed w's carry-over
+      const isConsumed = marketWeeks.some(other => {
+        if (other.id === w.id) return false;
+
+        // 1. Explicitly referenced in advanceReason of another week
+        if (other.advanceReason && (other.advanceReason.includes(w.weekDate) || other.advanceReason.includes(w.id))) {
+          return true;
+        }
+
+        // 2. If 'other' is chronologically newer than 'w' and has carried forward capital or has a remaining carry-forward note,
+        // then the sequential team capital rollover has absorbed 'w'
+        const isOtherNewer = new Date(other.weekDate).getTime() > new Date(w.weekDate).getTime();
+        const otherAdv = parseAdvanceReason(other.advanceReason);
+        const otherNote = parseWeekNote(other.note);
+        if (isOtherNewer && (otherAdv.carryForwardAmount > 0 || otherNote.carryForwardRemaining > 0)) {
+          return true;
+        }
+
+        return false;
+      });
+
+      return !isConsumed;
     });
   };
 
@@ -263,13 +286,15 @@ export default function WednesdayMarket({
   const selectedCosts = selectedWeekItems.filter(item => item.type === "cost");
   const selectedRevenues = selectedWeekItems.filter(item => item.type === "revenue");
 
-  // Allow editing if status is planned/active AND user is treasurer, committee, or the team leader/member of this week
+  // Allow editing if status is planned/active AND user is treasurer, committee, creator, or team leader/member of this week
+  const isWeekCreator = selectedWeek && currentUser.id === selectedWeek.createdBy;
   const isWeekLeader = selectedWeek && currentUser.id === selectedWeek.leaderId;
   const isWeekMember = selectedWeek && selectedWeek.memberIds && selectedWeek.memberIds.includes(currentUser.id);
   const canEdit = selectedWeek && 
                   (selectedWeek.status === "planned" || selectedWeek.status === "active") && 
                   (currentUser.role === "treasurer" || 
                    currentUser.role === "committee" ||
+                   isWeekCreator ||
                    isWeekLeader ||
                    isWeekMember);
 
@@ -456,12 +481,22 @@ export default function WednesdayMarket({
 
   const handleProposeAdvanceSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedWeek || !onProposeMarketAdvance || isSubmittingAdvance || !advanceAmount) return;
+    if (!selectedWeek || !onProposeMarketAdvance || isSubmittingAdvance) return;
+
+    const carryAmt = Number(carryForwardAmountInput) || 0;
+    const newAmt = Number(advanceAmount) || 0;
+    const totalCap = carryAmt + newAmt;
+
+    if (totalCap <= 0) {
+      alert("กรุณาระบุเงินทุนยกมาจากรอบก่อนหน้า หรือระบุจำนวนเงินเบิกโอนเพิ่มใหม่ให้มากกว่า 0 บาทค่ะ");
+      return;
+    }
+
     setIsSubmittingAdvance(true);
     setShowAdvanceModal(false);
     try {
-      const fullReason = makeAdvanceReason(advanceReason, Number(carryForwardAmountInput) || 0);
-      const res = await onProposeMarketAdvance(selectedWeek.id, Number(advanceAmount), fullReason);
+      const fullReason = makeAdvanceReason(advanceReason, carryAmt);
+      const res = await onProposeMarketAdvance(selectedWeek.id, newAmt, fullReason);
       setSelectedWeek(res.marketWeek);
       setAdvanceAmount("");
       setAdvanceReason("");
@@ -646,6 +681,9 @@ export default function WednesdayMarket({
       const slipUrl = parts[0].replace("SLIP_URL:", "");
       const note = parts[1] || "";
       return { note, slipUrl };
+    }
+    if (rawNote.startsWith("/api/images/") || rawNote.startsWith("data:image/") || rawNote.startsWith("http")) {
+      return { note: "", slipUrl: rawNote };
     }
     return { note: rawNote, slipUrl: "" };
   };
@@ -1226,18 +1264,16 @@ export default function WednesdayMarket({
             <div className="bg-white rounded-2xl p-4 border border-slate-100 shadow-sm space-y-3">
               <div className="flex justify-between items-center">
                 <h3 className="font-bold text-xs text-slate-400 uppercase tracking-wider">รอบสัปดาห์</h3>
-                {canManageMarket && (
-                  <button 
-                    onClick={() => {
-                      setNewLeaderId(currentUser.id);
-                      setNewMemberIds([]);
-                      setShowAddWeekModal(true);
-                    }}
-                    className="text-[10px] font-bold text-blue-600 hover:text-blue-700 flex items-center gap-0.5"
-                  >
-                    <Plus size={12} /> เพิ่มรอบ
-                  </button>
-                )}
+                <button 
+                  onClick={() => {
+                    setNewLeaderId(currentUser.id);
+                    setNewMemberIds([]);
+                    setShowAddWeekModal(true);
+                  }}
+                  className="text-[10px] font-bold text-blue-600 hover:text-blue-700 flex items-center gap-0.5 cursor-pointer"
+                >
+                  <Plus size={12} /> เพิ่มรอบ/เพิ่มทีมตลาด
+                </button>
               </div>
               
               <div className="flex md:flex-col gap-2 overflow-x-auto md:overflow-y-auto pb-2 md:pb-0 snap-x scrollbar-none">

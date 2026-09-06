@@ -141,13 +141,15 @@ router.post("/activities/budget/request", asyncHandler(async (req, res) => {
 // Budget approve
 router.post("/activities/budget/approve", asyncHandler(async (req, res) => {
   const { requestId, treasurerId, action, rejectReason } = req.body;
+  const slipUrl = req.body.slipUrl || req.body.slip_url || req.body.receiptUrl || req.body.receipt_url || "";
   if (!requestId || !treasurerId || !action) return res.status(400).json({ error: "Missing parameters" });
   const { data: budgetReq } = await supabase.from("budget_requests").select("*").eq("id", requestId).single();
   if (!budgetReq) return res.status(404).json({ error: "Budget request not found" });
 
   if (action === "approve") {
-    await supabase.from("budget_requests").update({ status: "approved", approved_by: treasurerId, approved_at: new Date().toISOString() }).eq("id", requestId);
-    await supabase.from("transactions").insert({ id: `tx_${Date.now()}`, type: "expense", category: "activity_expense", amount: budgetReq.amount, description: `จ่ายงบประมาณโครงการ: ${budgetReq.title}`, reference_id: budgetReq.id, reference_type: "budget_request", created_by: treasurerId, approved_by: treasurerId, approved_at: new Date().toISOString(), month: new Date().getMonth() + 1, year: 2569, is_closed: false, created_at: new Date().toISOString() });
+    const updatedDocs = slipUrl ? Array.from(new Set([...(budgetReq.document_urls || []), slipUrl])) : (budgetReq.document_urls || []);
+    await supabase.from("budget_requests").update({ status: "approved", approved_by: treasurerId, approved_at: new Date().toISOString(), document_urls: updatedDocs }).eq("id", requestId);
+    await supabase.from("transactions").insert({ id: `tx_${Date.now()}`, type: "expense", category: "activity_expense", amount: budgetReq.amount, description: `จ่ายงบประมาณโครงการ: ${budgetReq.title}`, reference_id: budgetReq.id, reference_type: "budget_request", receipt_url: slipUrl || "", created_by: treasurerId, approved_by: treasurerId, approved_at: new Date().toISOString(), month: new Date().getMonth() + 1, year: 2569, is_closed: false, created_at: new Date().toISOString() });
     if (budgetReq.activity_id) await supabase.from("activities").update({ status: "in_progress", updated_at: new Date().toISOString() }).eq("id", budgetReq.activity_id);
     await createNotification(budgetReq.requested_by, "คำขอเบิกงบประมาณอนุมัติแล้ว 💸", `คำขอเบิกงบ "${budgetReq.title}" ยอดเงิน ${budgetReq.amount} บาท โอนจ่ายเรียบร้อย`, "activity", requestId, "budget_request");
   } else {
@@ -161,8 +163,15 @@ router.post("/activities/budget/approve", asyncHandler(async (req, res) => {
 
 // Budget expansion propose
 router.post("/activities/budget-expansion/propose", asyncHandler(async (req, res) => {
-  const { activityId, originalRequestId, amount, reason, userId } = req.body;
-  if (!activityId || !originalRequestId || !amount || !userId) return res.status(400).json({ error: "Missing required parameters" });
+  const activityId = req.body.activityId || req.body.id;
+  const originalRequestId = req.body.originalRequestId || req.body.requestId || req.body.original_request_id;
+  const amount = req.body.amount;
+  const reason = req.body.reason || "";
+  const userId = req.body.userId || req.body.user_id || req.body.requesterId;
+
+  if (!activityId || !originalRequestId || !amount || !userId) {
+    return res.status(400).json({ error: "กรุณาระบุโครงการ รหัสคำขอเดิม จำนวนเงิน และผู้ขอขยายงบให้ครบถ้วนค่ะ" });
+  }
   await supabase.from("activities").update({ budget_expansion_requested: Number(amount), budget_expansion_reason: reason || "", budget_expansion_status: "pending", budget_expansion_reject_reason: "" }).eq("id", activityId);
   const { data: originalReq } = await supabase.from("budget_requests").select("title").eq("id", originalRequestId).single();
   const reqId = `exp_${Date.now()}`;
@@ -179,18 +188,26 @@ router.post("/activities/budget-expansion/propose", asyncHandler(async (req, res
 
 // Budget expansion approve
 router.post("/activities/budget-expansion/approve", asyncHandler(async (req, res) => {
-  const { requestId, treasurerId, action, rejectReason } = req.body;
-  if (!requestId || !treasurerId || !action) return res.status(400).json({ error: "Missing required parameters" });
+  const requestId = req.body.requestId || req.body.id;
+  const treasurerId = req.body.treasurerId || req.body.userId || req.body.user_id || req.body.adminId;
+  const action = req.body.action;
+  const rejectReason = req.body.rejectReason || req.body.reason || "";
+  const slipUrl = req.body.slipUrl || req.body.slip_url || req.body.receiptUrl || req.body.receipt_url || "";
+
+  if (!requestId || !treasurerId || !action) {
+    return res.status(400).json({ error: "กรุณาระบุรหัสคำขอ ผู้ดำเนินการ และการตัดสินใจค่ะ" });
+  }
   const { data: budgetReq } = await supabase.from("budget_requests").select("*").eq("id", requestId).single();
   if (!budgetReq) return res.status(404).json({ error: "Budget request not found" });
   const { data: act } = await supabase.from("activities").select("*").eq("id", budgetReq.activity_id).single();
   if (!act) return res.status(404).json({ error: "Activity not found" });
 
   if (action === "approve") {
-    await supabase.from("budget_requests").update({ status: "approved", approved_by: treasurerId, approved_at: new Date().toISOString() }).eq("id", requestId);
+    const updatedDocs = slipUrl ? Array.from(new Set([...(budgetReq.document_urls || []), slipUrl])) : (budgetReq.document_urls || []);
+    await supabase.from("budget_requests").update({ status: "approved", approved_by: treasurerId, approved_at: new Date().toISOString(), document_urls: updatedDocs }).eq("id", requestId);
     const newBudget = (act.budget_approved || act.budget_estimated || 0) + budgetReq.amount;
     await supabase.from("activities").update({ budget_approved: newBudget, budget_expansion_status: "approved", budget_expansion_approved_by: treasurerId, budget_expansion_approved_at: new Date().toISOString(), budget_expansion_reject_reason: "" }).eq("id", budgetReq.activity_id);
-    await supabase.from("transactions").insert({ id: `tx_${Date.now()}`, type: "expense", category: "activity_expense", amount: budgetReq.amount, description: `จ่ายเงินขยายงบประมาณโครงการ: ${budgetReq.title}`, reference_id: budgetReq.id, reference_type: "budget_request", created_by: treasurerId, approved_by: treasurerId, approved_at: new Date().toISOString(), month: new Date().getMonth() + 1, year: 2569, is_closed: false, created_at: new Date().toISOString() });
+    await supabase.from("transactions").insert({ id: `tx_${Date.now()}`, type: "expense", category: "activity_expense", amount: budgetReq.amount, description: `จ่ายเงินขยายงบประมาณโครงการ: ${budgetReq.title}`, reference_id: budgetReq.id, reference_type: "budget_request", receipt_url: slipUrl || "", created_by: treasurerId, approved_by: treasurerId, approved_at: new Date().toISOString(), month: new Date().getMonth() + 1, year: 2569, is_closed: false, created_at: new Date().toISOString() });
     await createNotification(act.proposed_by, "คำขอขยายงบประมาณได้รับการอนุมัติแล้ว! 🎉", `โครงการ "${act.title}" ได้รับเพิ่มงบอีก ${budgetReq.amount} บาท`, "activity", budgetReq.activity_id, "activity");
   } else {
     await supabase.from("budget_requests").update({ status: "rejected", reject_reason: rejectReason || "" }).eq("id", requestId);
@@ -203,10 +220,54 @@ router.post("/activities/budget-expansion/approve", asyncHandler(async (req, res
   res.json({ success: true, activity: convertKeysToCamel(updatedAct), budgetRequest: convertKeysToCamel(updatedReq) });
 }));
 
+// Budget request / expansion delete
+router.post("/activities/budget/delete", asyncHandler(async (req, res) => {
+  const requestId = req.body.requestId || req.body.id;
+  const userId = req.body.userId || req.body.user_id;
+  if (!requestId || !userId) return res.status(400).json({ error: "Missing parameters" });
+
+  const { data: budgetReq } = await supabase.from("budget_requests").select("*").eq("id", requestId).single();
+  if (!budgetReq) return res.status(404).json({ error: "Budget request not found" });
+
+  const { data: user } = await supabase.from("users").select("*").eq("id", userId).single();
+  if (!user) return res.status(404).json({ error: "User not found" });
+
+  const isComm = isCommitteeRole(user);
+  if (!(isComm || budgetReq.requested_by === userId)) return res.status(403).json({ error: "ไม่มีสิทธิ์ลบคำขอเบิกงบประมาณนี้" });
+
+  if (budgetReq.status === "approved") {
+    await supabase.from("transactions").delete().eq("reference_type", "budget_request").eq("reference_id", requestId);
+  }
+
+  if (budgetReq.is_expansion && budgetReq.activity_id && budgetReq.status === "approved") {
+    const { data: act } = await supabase.from("activities").select("*").eq("id", budgetReq.activity_id).single();
+    if (act) {
+      const newBudget = Math.max(0, (act.budget_approved || 0) - budgetReq.amount);
+      await supabase.from("activities").update({
+        budget_approved: newBudget,
+        budget_expansion_status: "none",
+        budget_expansion_requested: 0,
+        budget_expansion_reason: ""
+      }).eq("id", budgetReq.activity_id);
+    }
+  }
+
+  await supabase.from("budget_requests").delete().eq("id", requestId);
+  await writeLog(userId, "delete_budget_request", "budget_request", requestId, { title: budgetReq.title });
+  res.json({ success: true });
+}));
+
 // External income propose
 router.post("/activities/external-income/propose", asyncHandler(async (req, res) => {
-  const { activityId, amount, source, slipUrl, userId } = req.body;
-  if (!activityId || !amount || !source || !userId) return res.status(400).json({ error: "Missing required parameters" });
+  const activityId = req.body.activityId || req.body.id;
+  const amount = req.body.amount;
+  const source = req.body.source || req.body.title || "เงินสนับสนุน";
+  const slipUrl = req.body.slipUrl || req.body.slip_url || "";
+  const userId = req.body.userId || req.body.user_id || req.body.requesterId;
+
+  if (!activityId || !amount || !source || !userId) {
+    return res.status(400).json({ error: "กรุณาระบุโครงการ จำนวนเงิน แหล่งที่มา และผู้บันทึกให้ครบถ้วนค่ะ" });
+  }
   const { data: act } = await supabase.from("activities").select("*").eq("id", activityId).single();
   if (!act) return res.status(404).json({ error: "Activity not found" });
   const incId = `inc_${Date.now()}`;
@@ -223,8 +284,15 @@ router.post("/activities/external-income/propose", asyncHandler(async (req, res)
 
 // External income approve
 router.post("/activities/external-income/approve", asyncHandler(async (req, res) => {
-  const { activityId, incomeId, treasurerId, action, rejectReason } = req.body;
-  if (!activityId || !incomeId || !treasurerId || !action) return res.status(400).json({ error: "Missing required parameters" });
+  const activityId = req.body.activityId || req.body.id;
+  const incomeId = req.body.incomeId || req.body.id;
+  const treasurerId = req.body.treasurerId || req.body.userId || req.body.user_id || req.body.adminId;
+  const action = req.body.action;
+  const rejectReason = req.body.rejectReason || req.body.reason || "";
+
+  if (!activityId || !incomeId || !treasurerId || !action) {
+    return res.status(400).json({ error: "กรุณาระบุโครงการ รายการเงินสนับสนุน ผู้ดำเนินการ และการตัดสินใจค่ะ" });
+  }
   const { data: act } = await supabase.from("activities").select("*").eq("id", activityId).single();
   if (!act) return res.status(404).json({ error: "Activity not found" });
   const externalIncomes = (act.external_incomes || []) as ExternalIncome[];

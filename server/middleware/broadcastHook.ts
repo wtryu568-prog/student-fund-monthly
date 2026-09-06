@@ -11,22 +11,37 @@ import type { SseClient } from "../types/server";
 let sseClients: SseClient[] = [];
 
 // Initialize Supabase Realtime channel for broadcasting
+let isRealtimeSubscribed = false;
 const supabaseRealtimeChannel = supabase.channel("app-updates");
-supabaseRealtimeChannel.subscribe((status) => {
-  console.log(`[Supabase Realtime] Server subscription status: ${status}`);
-});
+try {
+  supabaseRealtimeChannel.subscribe((status) => {
+    if (status === "SUBSCRIBED") {
+      isRealtimeSubscribed = true;
+      console.log(`[Supabase Realtime] Server subscription status: ${status}`);
+    } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+      isRealtimeSubscribed = false;
+      console.warn(`[Supabase Realtime] Channel status: ${status} (SSE stream will handle realtime delivery)`);
+    } else {
+      console.log(`[Supabase Realtime] Server subscription status: ${status}`);
+    }
+  });
+} catch (err: any) {
+  console.warn("[Supabase Realtime] Subscribe skipped:", err.message);
+}
 
 export function broadcastStateUpdate() {
-  // 1. Broadcast over Supabase Realtime
-  supabaseRealtimeChannel.send({
-    type: "broadcast",
-    event: "state_changed",
-    payload: { timestamp: Date.now() },
-  }).then((res) => {
-    console.log("[Supabase Realtime] Broadcast sent successfully:", res);
-  }).catch((err) => {
-    console.error("[Supabase Realtime] Broadcast error:", err);
-  });
+  // 1. Broadcast over Supabase Realtime if connected
+  if (isRealtimeSubscribed) {
+    supabaseRealtimeChannel.send({
+      type: "broadcast",
+      event: "state_changed",
+      payload: { timestamp: Date.now() },
+    }).then((res) => {
+      console.log("[Supabase Realtime] Broadcast sent successfully:", res);
+    }).catch(() => {
+      // Suppress unhandled error, SSE fallback handles clients
+    });
+  }
 
   // 2. Broadcast over SSE (as fallback)
   const message = `data: ${JSON.stringify({ type: "state_changed", timestamp: Date.now() })}\n\n`;

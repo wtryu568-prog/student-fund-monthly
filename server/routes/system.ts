@@ -15,6 +15,7 @@ import { asyncHandler } from "../middleware/errorHandler";
 import { getAccessToken as getDriveAccessToken, parseFolderId, getOrCreateFolder, uploadFile } from "../services/googleDriveService";
 import { REAL_STUDENTS } from "../data/seedStudents";
 import { User, MonthlyBill, Transaction } from "../../src/types";
+import JSZip from "jszip";
 
 const router = Router();
 
@@ -122,140 +123,154 @@ router.post("/system/generate-summary", asyncHandler(async (req, res) => {
   res.json({ success: true, summaryText, dateReadable });
 }));
 
-// System Images Migration to Google Drive
-router.post("/system/migrate-images-to-drive", asyncHandler(async (req, res) => {
-  const { userId, googleToken } = req.body;
-  if (!userId) return res.status(400).json({ error: "Missing parameters" });
+// Download all slips and receipts as a ZIP archive down to local computer
+router.post("/system/download-all-slips", asyncHandler(async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.status(400).json({ error: "Missing userId" });
 
-  const { data: requester } = await supabase.from("users").select("role").eq("id", userId).single();
-  if (!requester || requester.role !== "treasurer") {
-    return res.status(403).json({ error: "ขออภัย คุณไม่มีสิทธิ์เข้าถึงฟังก์ชันการย้ายไฟล์ภาพ (เฉพาะเหรัญญิกหลักเท่านั้นค่ะ)" });
+  const { data: user } = await supabase.from("users").select("role").eq("id", userId).single();
+  const allowedRoles = ["treasurer", "president", "committee", "teacher", "admin", "leader"];
+  if (!user || !allowedRoles.includes(user.role)) {
+    return res.status(403).json({ error: "เฉพาะเหรัญญิกและคณะกรรมการเท่านั้นที่มีสิทธิ์ดาวน์โหลดรูปภาพสลิปทั้งหมด" });
   }
 
-  const driveConfigured = (googleToken || (ENV.GOOGLE_SERVICE_ACCOUNT_EMAIL && ENV.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY)) && ENV.GOOGLE_DRIVE_ROOT_FOLDER_LINK;
-  if (!driveConfigured) {
-    return res.status(400).json({ error: "กรุณาตั้งค่าลิงก์ Google Drive ในไฟล์ .env หรือเชื่อมต่อบัญชี Google ก่อนดำเนินการค่ะ" });
-  }
+  const zip = new JSZip();
 
-  // 1. Fetch raw base64 images from images table
-  const { data: rawImages, error: fetchErr } = await supabase
-    .from("images")
-    .select("id, base64")
-    .not("base64", "like", "google_drive:%");
+  // Fetch image records and associated metadata
+  const { data: rawImages } = await supabase.from("images").select("id, base64");
+  const { data: payments } = await supabase.from("payments").select("*");
+  const { data: users } = await supabase.from("users").select("id, full_name, student_id");
+  const { data: bills } = await supabase.from("monthly_bills").select("id, month, year");
+  const { data: marketItems } = await supabase.from("market_items").select("*");
+  const { data: marketWeeks } = await supabase.from("market_weeks").select("*");
 
-  if (fetchErr) throw fetchErr;
+  const dateStr = new Date().toISOString().split("T")[0];
+  let fileCount = 0;
 
-  let migratedCount = 0;
-  const errors: string[] = [];
+  const getBufferFromBase64 = (str: string): { buffer: Buffer; ext: string } | null => {
+    if (!str || typeof str !== "string") return null;
+    let clean = str;
+    let ext = "jpg";
 
-  const rootLink = ENV.GOOGLE_DRIVE_ROOT_FOLDER_LINK || "";
-  const rootFolderId = parseFolderId(rootLink);
-  if (!rootFolderId) {
-    return res.status(400).json({ error: "ไม่สามารถสกัดรหัสโฟลเดอร์หลัก Google Drive จากลิงก์ที่ระบุได้ค่ะ" });
-  }
+    if (clean.includes("|NOTE:")) {
+      clean = clean.split("|NOTE:")[0];
+    }
+    if (clean.startsWith("SLIP_URL:")) {
+      clean = clean.replace("SLIP_URL:", "");
+    }
 
-  // 2. Loop through and upload to Drive
-  for (const img of (rawImages || [])) {
-    if (!img.base64 || !img.base64.startsWith("data:image/")) continue;
-
-    try {
-      let folderId = rootFolderId;
-      let filename = `สลิป_ย้อนหลัง_${img.id}.jpg`;
-      let folderPath: string[] = ["ทั่วไป"];
-
-      // Context matching
-      // A. Check payments table
-      const { data: payment } = await supabase.from("payments").select("bill_id, user_id").eq("slip_url", `/api/images/${img.id}`).limit(1).maybeSingle();
-      if (payment) {
-        const { data: bill } = await supabase.from("monthly_bills").select("month, year").eq("id", payment.bill_id).single();
-        const { data: user } = await supabase.from("users").select("full_name, student_id").eq("id", payment.user_id).single();
-
-        const month = bill?.month || new Date().getMonth() + 1;
-        const year = bill?.year || 2569;
-        const studentId = user?.student_id || "unknown";
-        const fullName = user?.full_name || "member";
-        const cleanName = fullName.replace(/[\s\/\\]+/g, "_");
-        filename = `สลิป_${studentId}_${cleanName}.jpg`;
-        folderPath = ["ค่าบำรุงรายเดือน", `ปี พ.ศ. ${year}`, `เดือน ${String(month).padStart(2, "0")}`];
-      } else {
-        // B. Check Wednesday Market advances
-        const { data: marketWeekAdv } = await supabase.from("market_weeks").select("week_date, team_name").eq("advance_receipt_url", `/api/images/${img.id}`).limit(1).maybeSingle();
-        if (marketWeekAdv) {
-          const weekDate = marketWeekAdv.week_date;
-          const teamName = marketWeekAdv.team_name || "กลุ่มจำหน่ายสินค้า";
-          const cleanTeam = teamName.replace(/[\s\/\\]+/g, "_");
-          filename = `สลิป_เงินทุนล่วงหน้า.jpg`;
-          folderPath = ["ตลาดวันพุธ", `รอบวันที่ ${weekDate}_${cleanTeam}`];
-        } else {
-          // C. Check Wednesday Market additional advances
-          const { data: marketWeekAdd } = await supabase.from("market_weeks").select("week_date, team_name").eq("additional_advance_receipt_url", `/api/images/${img.id}`).limit(1).maybeSingle();
-          if (marketWeekAdd) {
-            const weekDate = marketWeekAdd.week_date;
-            const teamName = marketWeekAdd.team_name || "กลุ่มจำหน่ายสินค้า";
-            const cleanTeam = teamName.replace(/[\s\/\\]+/g, "_");
-            filename = `สลิป_เงินทุนเพิ่มเติม.jpg`;
-            folderPath = ["ตลาดวันพุธ", `รอบวันที่ ${weekDate}_${cleanTeam}`];
-          } else {
-            // D. Check Activities/Projects
-            const { data: actRefund } = await supabase.from("activities").select("title").eq("refund_slip_url", `/api/images/${img.id}`).limit(1).maybeSingle();
-            if (actRefund) {
-              const cleanTitle = actRefund.title.replace(/[\s\/\\]+/g, "_");
-              filename = `สลิป_เงินทอนคงเหลือ.jpg`;
-              folderPath = ["กิจกรรมและโครงการ", `โครงการ_${cleanTitle}`];
-            }
-          }
-        }
+    if (clean.startsWith("data:image/")) {
+      const match = clean.match(/^data:image\/([a-zA-Z0-9]+);base64,(.+)$/);
+      if (match) {
+        ext = match[1] === "jpeg" ? "jpg" : match[1];
+        return { buffer: Buffer.from(match[2], "base64"), ext };
       }
+    } else if (!clean.startsWith("http") && !clean.startsWith("google_drive:") && !clean.startsWith("/")) {
+      return { buffer: Buffer.from(clean, "base64"), ext: "jpg" };
+    }
+    return null;
+  };
 
-      folderId = await getOrCreateFolder(folderPath, rootFolderId, googleToken);
-      const driveResult = await uploadFile(img.base64, filename, folderId, googleToken);
+  const processedImageIds = new Set<string>();
 
-      await supabase.from("images").update({ base64: `google_drive:${driveResult.id}` }).eq("id", img.id);
-      migratedCount++;
-    } catch (err: any) {
-      console.error(`Failed to migrate image ${img.id}:`, err.message);
-      errors.push(`รูปภาพ ${img.id}: ${err.message}`);
+  // 1. Package Monthly Bills Slips
+  for (const p of (payments || [])) {
+    if (!p.slip_url || p.slip_url === "cash" || p.slip_url === "deleted") continue;
+
+    let imgData: { buffer: Buffer; ext: string } | null = null;
+
+    if (p.slip_url.startsWith("/api/images/")) {
+      const imgId = p.slip_url.replace("/api/images/", "").split("|")[0];
+      processedImageIds.add(imgId);
+      const imgRow = (rawImages || []).find(i => i.id === imgId);
+      if (imgRow?.base64) {
+        imgData = getBufferFromBase64(imgRow.base64);
+      }
+    } else if (p.slip_url.startsWith("data:image/")) {
+      imgData = getBufferFromBase64(p.slip_url);
+    }
+
+    if (imgData) {
+      const bill = (bills || []).find(b => b.id === p.bill_id);
+      const payUser = (users || []).find(u => u.id === p.user_id);
+      const month = bill?.month || new Date().getMonth() + 1;
+      const year = bill?.year || 2569;
+      const studentId = payUser?.student_id || "unknown";
+      const fullName = (payUser?.full_name || "member").replace(/[\s\/\\]+/g, "_");
+      const amount = p.amount || 0;
+
+      const folderPath = `สลิปค่าบำรุงรายเดือน/ปี_${year}/เดือน_${String(month).padStart(2, "0")}`;
+      const fileName = `สลิป_${studentId}_${fullName}_${amount}บาท.${imgData.ext}`;
+      zip.folder(folderPath)?.file(fileName, imgData.buffer);
+      fileCount++;
     }
   }
 
-  // 3. Scan market_items table for embedded base64 note (SLIP_URL:data:image/...)
-  const { data: marketItems, error: itemsErr } = await supabase
-    .from("market_items")
-    .select("id, note, market_week_id, item_name")
-    .like("note", "SLIP_URL:data:image/%");
-
-  if (itemsErr) throw itemsErr;
-
+  // 2. Package Wednesday Market Receipt Slips
   for (const item of (marketItems || [])) {
-    try {
-      const parts = item.note.split("|NOTE:");
-      const rawBase64 = parts[0].replace("SLIP_URL:", "");
-      const noteText = parts[1] || "";
+    if (!item.note || !item.note.includes("SLIP_URL:")) continue;
 
-      const { data: week } = await supabase.from("market_weeks").select("week_date, team_name").eq("id", item.market_week_id).single();
-      const weekDate = week?.week_date || new Date().toISOString().split("T")[0];
-      const teamName = week?.team_name || "กลุ่มจำหน่ายสินค้า";
-      const cleanTeam = teamName.replace(/[\s\/\\]+/g, "_");
+    const parts = item.note.split("|NOTE:");
+    const rawSlipUrl = parts[0].replace("SLIP_URL:", "");
+    let imgData: { buffer: Buffer; ext: string } | null = null;
 
-      const cleanItemName = item.item_name.replace(/[\s\/\\]+/g, "_");
-      const filename = `ใบเสร็จ_สินค้า_${cleanItemName}.jpg`;
-      const folderPath = ["ตลาดวันพุธ", `รอบวันที่ ${weekDate}_${cleanTeam}`];
+    if (rawSlipUrl.startsWith("/api/images/")) {
+      const imgId = rawSlipUrl.replace("/api/images/", "");
+      processedImageIds.add(imgId);
+      const imgRow = (rawImages || []).find(i => i.id === imgId);
+      if (imgRow?.base64) {
+        imgData = getBufferFromBase64(imgRow.base64);
+      }
+    } else if (rawSlipUrl.startsWith("data:image/")) {
+      imgData = getBufferFromBase64(rawSlipUrl);
+    }
 
-      const folderId = await getOrCreateFolder(folderPath, rootFolderId, googleToken);
-      const driveResult = await uploadFile(rawBase64, filename, folderId, googleToken);
+    if (imgData) {
+      const week = (marketWeeks || []).find(w => w.id === item.market_week_id);
+      const weekDate = week?.week_date || dateStr;
+      const teamName = (week?.team_name || "กลุ่มจำหน่ายสินค้า").replace(/[\s\/\\]+/g, "_");
+      const cleanItemName = (item.item_name || "สินค้า").replace(/[\s\/\\]+/g, "_");
 
-      const imgId = `img_mig_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-      await supabase.from("images").insert({ id: imgId, base64: `google_drive:${driveResult.id}` });
-      await supabase.from("market_items").update({ note: `SLIP_URL:/api/images/${imgId}|NOTE:${noteText}` }).eq("id", item.id);
-      migratedCount++;
-    } catch (err: any) {
-      console.error(`Failed to migrate market item note ${item.id}:`, err.message);
-      errors.push(`สินค้า ${item.item_name}: ${err.message}`);
+      const folderPath = `หลักฐานตลาดวันพุธ/รอบ_${weekDate}_${teamName}`;
+      const fileName = `ใบเสร็จ_${cleanItemName}_${item.amount}บาท.${imgData.ext}`;
+      zip.folder(folderPath)?.file(fileName, imgData.buffer);
+      fileCount++;
     }
   }
 
-  await writeLog(userId, "migrate_images_to_drive", "system", undefined, { migratedCount, errorsCount: errors.length });
-  res.json({ success: true, migratedCount, errors });
+  // 3. Package Any Remaining Unmapped Base64 Images
+  for (const img of (rawImages || [])) {
+    if (processedImageIds.has(img.id) || !img.base64 || img.base64.startsWith("google_drive:")) continue;
+    const imgData = getBufferFromBase64(img.base64);
+    if (imgData) {
+      zip.folder("รูปภาพอื่นๆในระบบ")?.file(`รูปภาพ_${img.id}.${imgData.ext}`);
+      fileCount++;
+    }
+  }
+
+  // Add Summary Manifest File
+  const manifest = `================================================
+รายงานสรุปการส่งออกรูปภาพสลิปและหลักฐานทั้งหมด
+วันที่ดาวน์โหลด: ${new Date().toLocaleString("th-TH", { timeZone: "Asia/Bangkok" })}
+ผู้ส่งออก: ${userId}
+จำนวนรูปภาพที่รวมเข้า ZIP: ${fileCount} รายการ
+================================================
+คำแนะนำ:
+หลังจากตรวจสอบไฟล์ ZIP ในเครื่องคอมพิวเตอร์ของคุณเรียบร้อยแล้ว
+คุณสามารถกดปุ่ม "เคลียร์รูปภาพออกจากระบบ (Purge Storage)" 
+ในหน้าแอดมินเพื่อลบรูปภาพสลิปออกจากฐานข้อมูล 
+เพื่อช่วยให้แอดมินใช้งานแอปได้อย่างเบาหวิวและรวดเร็วตลอด 2.5 ปีค่ะ!
+================================================`;
+
+  zip.file("สรุปรายการหลักฐานสลิปทั้งหมด.txt", manifest);
+
+  const zipBuffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
+
+  await writeLog(userId, "download_all_slips_zip", "system", undefined, { fileCount, sizeBytes: zipBuffer.length });
+
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader("Content-Disposition", `attachment; filename="student_fund_slips_${dateStr}.zip"`);
+  res.send(zipBuffer);
 }));
 
 // Purge raw Base64 images from DB to free up storage space 100%
@@ -264,8 +279,9 @@ router.post("/system/purge-base64-slips", asyncHandler(async (req, res) => {
   if (!userId) return res.status(400).json({ error: "Missing userId" });
 
   const { data: user } = await supabase.from("users").select("role").eq("id", userId).single();
-  if (!user || user.role !== "treasurer") {
-    return res.status(403).json({ error: "เฉพาะเหรัญญิกเท่านั้นที่มีสิทธิ์สั่งเคลียร์รูปภาพจากระบบ" });
+  const allowedRoles = ["treasurer", "president", "committee", "teacher", "admin", "leader"];
+  if (!user || !allowedRoles.includes(user.role)) {
+    return res.status(403).json({ error: "เฉพาะเหรัญญิกและคณะกรรมการเท่านั้นที่มีสิทธิ์สั่งเคลียร์รูปภาพจากระบบ" });
   }
 
   // Find all images in 'images' table that are raw Base64 (not starting with google_drive:)
@@ -277,23 +293,121 @@ router.post("/system/purge-base64-slips", asyncHandler(async (req, res) => {
   if (fetchErr) throw fetchErr;
 
   const count = rawImages?.length || 0;
-  if (count === 0) {
-    return res.json({ success: true, purgedCount: 0, message: "ไม่มีรูปภาพ Base64 ตกค้างในระบบแล้วค่ะ (ฐานข้อมูลว่างเปล่า 100%)" });
-  }
-
   const idsToPurge = (rawImages || []).map(img => img.id);
 
-  // Delete raw base64 records from images table
-  const { error: deleteErr } = await supabase.from("images").delete().in("id", idsToPurge);
-  if (deleteErr) throw deleteErr;
+  if (idsToPurge.length > 0) {
+    const { error: deleteErr } = await supabase.from("images").delete().in("id", idsToPurge);
+    if (deleteErr) throw deleteErr;
 
-  await writeLog(userId, "purge_base64_slips", "system", undefined, { purgedCount: count });
+    // Update any payments pointing to these purged image ids
+    for (const id of idsToPurge) {
+      await supabase.from("payments").update({ slip_url: "deleted" }).eq("slip_url", `/api/images/${id}`);
+    }
+  }
+
+  // Also clean up any direct data:image URI strings stored directly in payments.slip_url
+  const { data: dataUriPayments } = await supabase
+    .from("payments")
+    .select("id")
+    .like("slip_url", "data:image%");
+
+  if (dataUriPayments && dataUriPayments.length > 0) {
+    const payIds = dataUriPayments.map(p => p.id);
+    await supabase.from("payments").update({ slip_url: "deleted" }).in("id", payIds);
+  }
+
+  const totalPurged = count + (dataUriPayments?.length || 0);
+
+  await writeLog(userId, "purge_base64_slips", "system", undefined, { purgedCount: totalPurged });
 
   res.json({
     success: true,
-    purgedCount: count,
-    message: `🎉 เคลียร์รูปภาพ Base64 ออกจากคลาวด์ DB สำเร็จเรียบร้อยจำนวน ${count} รูป! ฐานข้อมูลว่างเปล่าและเบาหวิว 100% แล้วค่ะ`
+    purgedCount: totalPurged,
+    message: totalPurged > 0 
+      ? `🎉 เคลียร์รูปภาพ Base64 ออกจากคลาวด์ DB สำเร็จเรียบร้อยจำนวน ${totalPurged} รูป! ฐานข้อมูลว่างเปล่าและเบาหวิว 100% แล้วค่ะ`
+      : "ไม่มีรูปภาพ Base64 ตกค้างในระบบแล้วค่ะ (ฐานข้อมูลว่างเปล่าและเชื่อมต่อ Google Drive 100%)"
   });
+}));
+
+// Purge all or old slips from system (deletes from images table and sets payment slip_url to 'deleted')
+router.post("/system/purge-all-slips", asyncHandler(async (req, res) => {
+  const { userId, mode = "all" } = req.body; // mode: 'all' | 'older_30_days' | 'base64_only'
+  if (!userId) return res.status(400).json({ error: "Missing userId" });
+
+  const { data: user } = await supabase.from("users").select("role").eq("id", userId).single();
+  const allowedRoles = ["treasurer", "president", "committee", "teacher", "admin", "leader"];
+  if (!user || !allowedRoles.includes(user.role)) {
+    return res.status(403).json({ error: "เฉพาะเหรัญญิกและคณะกรรมการเท่านั้นที่มีสิทธิ์สั่งเคลียร์รูปภาพจากระบบ" });
+  }
+
+  let paymentQuery = supabase.from("payments").select("id, slip_url, created_at");
+  if (mode === "older_30_days") {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    paymentQuery = paymentQuery.lt("created_at", thirtyDaysAgo.toISOString());
+  }
+
+  const { data: targetPayments, error: payErr } = await paymentQuery;
+  if (payErr) throw payErr;
+
+  const validPayments = (targetPayments || []).filter(p => p.slip_url && p.slip_url !== "cash" && p.slip_url !== "deleted" && p.slip_url !== "");
+  const imageIdsToDelete: string[] = [];
+  const paymentIdsToUpdate: string[] = [];
+
+  for (const p of validPayments) {
+    if (p.slip_url.startsWith("/api/images/")) {
+      imageIdsToDelete.push(p.slip_url.replace("/api/images/", ""));
+      paymentIdsToUpdate.push(p.id);
+    } else if (p.slip_url.startsWith("data:image")) {
+      paymentIdsToUpdate.push(p.id);
+    } else if (mode === "all" && (p.slip_url.startsWith("google_drive:") || p.slip_url.startsWith("http"))) {
+      paymentIdsToUpdate.push(p.id);
+    }
+  }
+
+  let deletedImagesCount = 0;
+  if (imageIdsToDelete.length > 0) {
+    const { error: delImgErr } = await supabase.from("images").delete().in("id", imageIdsToDelete);
+    if (!delImgErr) deletedImagesCount = imageIdsToDelete.length;
+  }
+
+  if (paymentIdsToUpdate.length > 0) {
+    await supabase.from("payments").update({ slip_url: "deleted" }).in("id", paymentIdsToUpdate);
+  }
+
+  await writeLog(userId, "purge_all_slips", "system", undefined, { mode, clearedPayments: paymentIdsToUpdate.length, deletedImages: deletedImagesCount });
+
+  res.json({
+    success: true,
+    clearedCount: paymentIdsToUpdate.length,
+    deletedImagesCount,
+    message: `🧹 เคลียร์หลักฐานสลิปสำเร็จจำนวน ${paymentIdsToUpdate.length} รายการ (ประวัติการชำระเงินและบัญชีคงอยู่ครบถ้วน 100%)`
+  });
+}));
+
+// Clear/Delete single slip by payment ID
+router.post("/system/clear-single-slip", asyncHandler(async (req, res) => {
+  const { userId, paymentId } = req.body;
+  if (!userId || !paymentId) return res.status(400).json({ error: "Missing userId or paymentId" });
+
+  const { data: user } = await supabase.from("users").select("role").eq("id", userId).single();
+  const allowedRoles = ["treasurer", "president", "committee", "teacher", "admin", "leader"];
+  if (!user || !allowedRoles.includes(user.role)) {
+    return res.status(403).json({ error: "เฉพาะเหรัญญิกและคณะกรรมการเท่านั้นที่มีสิทธิ์ลบรูปสลิป" });
+  }
+
+  const { data: payment } = await supabase.from("payments").select("id, slip_url").eq("id", paymentId).single();
+  if (!payment) return res.status(404).json({ error: "ไม่พบรายการชำระเงินนี้" });
+
+  if (payment.slip_url && payment.slip_url.startsWith("/api/images/")) {
+    const imgId = payment.slip_url.replace("/api/images/", "");
+    await supabase.from("images").delete().eq("id", imgId);
+  }
+
+  await supabase.from("payments").update({ slip_url: "deleted" }).eq("id", paymentId);
+  await writeLog(userId, "clear_single_slip", "payment", paymentId);
+
+  res.json({ success: true, message: "ลบและเคลียร์ไฟล์รูปสลิปของรายการนี้เรียบร้อยแล้วค่ะ" });
 }));
 
 

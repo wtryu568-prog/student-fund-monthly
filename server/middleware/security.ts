@@ -24,7 +24,8 @@ export function applySecurityMiddleware(app: express.Application) {
     allowedHeaders: ["Content-Type", "Authorization"]
   }));
 
-  app.use(express.json({ limit: "10mb" }));
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ limit: "50mb", extended: true }));
 }
 
 // Rate limit rules for authentication to avoid spamming/bruteforce

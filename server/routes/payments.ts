@@ -18,15 +18,23 @@ const router = Router();
 
 // Cancel payment
 router.post("/payments/cancel", asyncHandler(async (req, res) => {
-  const { billId, userId } = req.body;
-  if (!billId || !userId) return res.status(400).json({ error: "Missing required parameters" });
+  const billId = req.body.billId || req.body.bill_id;
+  const userId = req.body.userId || req.body.user_id;
 
-  const { data: payment } = await supabase.from("payments").select("*").eq("bill_id", billId).eq("user_id", userId).eq("status", "pending_review").limit(1).single();
+  if (!billId) return res.status(400).json({ error: "กรุณาระบุรหัสบิลที่ต้องการยกเลิกคำขอค่ะ" });
+
+  let query = supabase.from("payments").select("*").eq("bill_id", billId).eq("status", "pending_review");
+  if (userId) {
+    query = query.eq("user_id", userId);
+  }
+  const { data: payments } = await query.limit(1);
+  const payment = payments && payments.length > 0 ? payments[0] : null;
+
   if (!payment) return res.status(404).json({ error: "ไม่พบหลักฐานการชำระเงินที่อยู่ระหว่างรอตรวจสอบ" });
 
   await supabase.from("payments").delete().eq("id", payment.id);
   await updateBillStatus(billId);
-  await writeLog(userId, "cancel_payment_request", "payment", payment.id, { billId, amount: payment.amount });
+  await writeLog(userId || payment.user_id || "unknown", "cancel_payment_request", "payment", payment.id, { billId, amount: payment.amount });
   res.json({ success: true, message: "ยกเลิกคำขอชำระเงินเรียบร้อยแล้ว" });
 }));
 

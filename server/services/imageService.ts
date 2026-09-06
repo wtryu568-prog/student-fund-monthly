@@ -128,21 +128,30 @@ export async function extractAndSaveImage(
   if (!base64Str || typeof base64Str !== "string") return base64Str;
   if (!base64Str.startsWith("data:image/")) return base64Str;
 
+  // Separate any trailing |NOTE: suffix if present
+  let noteSuffix = "";
+  let cleanBase64Str = base64Str;
+  if (base64Str.includes("|NOTE:")) {
+    const parts = base64Str.split("|NOTE:");
+    cleanBase64Str = parts[0];
+    noteSuffix = "|NOTE:" + (parts[1] || "");
+  }
+
   // 1. MIME Type Check
-  const match = base64Str.match(/^data:([^;]+);base64,(.+)$/);
+  const match = cleanBase64Str.match(/^data:([^;]+);base64,(.+)$/);
   if (!match) {
     throw new Error("รูปแบบไฟล์สลิปไม่ถูกต้องค่ะ");
   }
-  const mimeType = match[1];
-  const allowedMimeTypes = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
+  const mimeType = match[1].toLowerCase();
+  const allowedMimeTypes = ["image/jpeg", "image/jpg", "image/png", "image/webp", "image/heic", "image/heif", "image/gif", "image/bmp"];
   if (!allowedMimeTypes.includes(mimeType)) {
-    throw new Error("อนุญาตเฉพาะรูปภาพสลิปตระกูล JPG, PNG, และ WEBP เท่านั้นเพื่อความปลอดภัยค่ะ");
+    throw new Error("อนุญาตเฉพาะรูปภาพสลิปตระกูล JPG, PNG, WEBP, HEIC เท่านั้นเพื่อความปลอดภัยค่ะ");
   }
 
-  // 2. Size limit check (Max 5MB)
-  const rawSizeBytes = base64Str.length * 0.75;
-  if (rawSizeBytes > 5 * 1024 * 1024) {
-    throw new Error("ขนาดไฟล์รูปภาพสลิปห้ามเกิน 5MB ค่ะ");
+  // 2. Size limit check (Max 15MB)
+  const rawSizeBytes = cleanBase64Str.length * 0.75;
+  if (rawSizeBytes > 15 * 1024 * 1024) {
+    throw new Error("ขนาดไฟล์รูปภาพสลิปห้ามเกิน 15MB ค่ะ");
   }
 
   const imgId = `img_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
@@ -155,7 +164,7 @@ export async function extractAndSaveImage(
       const { folderId, filename } = await determineTargetFolderAndFilename(path, body);
       if (folderId) {
         console.log(`[Google Drive] Uploading ${filename} to folder ${folderId}...`);
-        const driveResult = await drive.uploadFile(base64Str, filename, folderId);
+        const driveResult = await drive.uploadFile(cleanBase64Str, filename, folderId);
         
         // Save the Google Drive file reference prefix in Supabase images table
         const { error } = await supabase.from("images").insert({
@@ -165,7 +174,7 @@ export async function extractAndSaveImage(
         if (error) throw error;
         
         console.log(`[Google Drive] ✅ Successfully saved image reference ${imgId} linking to Drive File ${driveResult.id}`);
-        return `/api/images/${imgId}`;
+        return `/api/images/${imgId}${noteSuffix}`;
       }
     } catch (err: any) {
       console.warn("[Google Drive] Upload failed. Falling back to local storage:", err.message);
@@ -174,7 +183,7 @@ export async function extractAndSaveImage(
 
   // 4. Local Database Fallback (if Drive is not configured or fails)
   try {
-    const { error } = await supabase.from("images").insert({ id: imgId, base64: base64Str });
+    const { error } = await supabase.from("images").insert({ id: imgId, base64: cleanBase64Str });
     if (error) throw error;
     console.log(`[Supabase] Saved image ${imgId} locally (Fallback)`);
   } catch (err) {
@@ -182,7 +191,7 @@ export async function extractAndSaveImage(
     throw new Error("ไม่สามารถบันทึกไฟล์สลิปขึ้นระบบ Cloud ได้ กรุณาลองใหม่อีกครั้งค่ะ");
   }
 
-  return `/api/images/${imgId}`;
+  return `/api/images/${imgId}${noteSuffix}`;
 }
 
 export async function extractImagesFromPayload(

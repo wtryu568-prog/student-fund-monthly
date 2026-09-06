@@ -158,10 +158,7 @@ export default function App() {
         setIsLoading(false);
       }
       if (isCritical) {
-        // Allow some time for state propagation before turning off the critical flag
-        setTimeout(() => {
-          isCriticalFetchRunningRef.current = false;
-        }, 500);
+        isCriticalFetchRunningRef.current = false;
       }
     }
   };
@@ -397,8 +394,17 @@ export default function App() {
         const errData = await res.json().catch(() => ({}));
         throw new Error(errData.error || "เกิดข้อผิดพลาดในการส่งข้อมูลสลิป");
       }
-      await fetchState();
-      return await res.json();
+      const data = await res.json();
+      if (data.payment) {
+        setState(prev => {
+          if (!prev) return prev;
+          const updatedPayments = [...prev.payments.filter(p => p.id !== data.payment.id), data.payment];
+          const updatedBills = prev.monthlyBills.map(b => b.id === billId ? { ...b, status: "pending_review" as const } : b);
+          return { ...prev, payments: updatedPayments, monthlyBills: updatedBills };
+        });
+      }
+      await fetchState(true);
+      return data;
     }, "กำลังส่งหลักฐานการชำระเงิน...");
   };
 
@@ -485,9 +491,22 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ weekDate, note, teamName, leaderId, memberIds, userId: currentUser.id })
       });
-      if (!res.ok) throw new Error("Market week creation failed");
-      await fetchState();
-      return await res.json();
+      const parsed = await safeParseJson(res);
+      if (!res.ok || parsed.error) {
+        throw new Error(String(parsed.error || "Market week creation failed"));
+      }
+      if (parsed.marketWeek) {
+        const mw = parsed.marketWeek as MarketWeek;
+        setState(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            marketWeeks: [mw, ...prev.marketWeeks.filter(w => w.id !== mw.id)]
+          };
+        });
+      }
+      await fetchState(true);
+      return parsed;
     }, "กำลังสร้างสัปดาห์ตลาดใหม่...");
   };
 
@@ -499,9 +518,22 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ marketWeekId, teamName, leaderId, memberIds, note, userId: currentUser.id })
       });
-      if (!res.ok) throw new Error("Update market week team failed");
-      await fetchState();
-      return await res.json();
+      const parsed = await safeParseJson(res);
+      if (!res.ok || parsed.error) {
+        throw new Error(String(parsed.error || "Update market week team failed"));
+      }
+      if (parsed.marketWeek) {
+        const mw = parsed.marketWeek as MarketWeek;
+        setState(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            marketWeeks: prev.marketWeeks.map(w => w.id === mw.id ? mw : w)
+          };
+        });
+      }
+      await fetchState(true);
+      return parsed;
     }, "กำลังอัปเดตทีมตลาด...");
   };
 
@@ -516,6 +548,16 @@ export default function App() {
       const parsed = await safeParseJson(res);
       if (!res.ok || parsed.error) {
         throw new Error(String(parsed.error || "Item add failed"));
+      }
+      if (parsed.item && parsed.marketWeek) {
+        const item = parsed.item as MarketItem;
+        const mw = parsed.marketWeek as MarketWeek;
+        setState(prev => {
+          if (!prev) return prev;
+          const updatedItems = [...prev.marketItems.filter(i => i.id !== item.id), item];
+          const updatedWeeks = prev.marketWeeks.map(w => w.id === mw.id ? mw : w);
+          return { ...prev, marketItems: updatedItems, marketWeeks: updatedWeeks };
+        });
       }
       await fetchState(true);
       return parsed;
@@ -533,6 +575,15 @@ export default function App() {
       const parsed = await safeParseJson(res);
       if (!res.ok || parsed.error) {
         throw new Error(String(parsed.error || "Item delete failed"));
+      }
+      if (parsed.marketWeek) {
+        const mw = parsed.marketWeek as MarketWeek;
+        setState(prev => {
+          if (!prev) return prev;
+          const updatedItems = prev.marketItems.filter(i => i.id !== itemId);
+          const updatedWeeks = prev.marketWeeks.map(w => w.id === mw.id ? mw : w);
+          return { ...prev, marketItems: updatedItems, marketWeeks: updatedWeeks };
+        });
       }
       await fetchState(true);
       return parsed;
@@ -585,6 +636,14 @@ export default function App() {
       if (!res.ok || parsed.error) {
         throw new Error(String(parsed.error || "Delete market week failed"));
       }
+      setState(prev => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          marketWeeks: prev.marketWeeks.filter(w => w.id !== marketWeekId),
+          marketItems: prev.marketItems.filter(i => i.marketWeekId !== marketWeekId)
+        };
+      });
       await fetchState(true);
       return parsed;
     }, "กำลังลบสัปดาห์ตลาด...");
@@ -699,13 +758,13 @@ export default function App() {
     }, "กำลังส่งคำขอขยายงบ...");
   };
 
-  const handleApproveBudgetExpansion = async (requestId: string, action: "approve" | "reject", rejectReason?: string) => {
+  const handleApproveBudgetExpansion = async (requestId: string, action: "approve" | "reject", rejectReason?: string, slipUrl?: string) => {
     if (!currentUser) return;
     return withLoading(async () => {
       const res = await fetch("/api/activities/budget-expansion/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ requestId, treasurerId: currentUser.id, action, rejectReason })
+        body: JSON.stringify({ requestId, treasurerId: currentUser.id, action, rejectReason, slipUrl })
       });
       if (!res.ok) {
         const err = await res.json();
@@ -714,6 +773,23 @@ export default function App() {
       await fetchState();
       return await res.json();
     }, "กำลังพิจารณาการขยายงบ...");
+  };
+
+  const handleDeleteBudgetRequest = async (requestId: string) => {
+    if (!currentUser) return;
+    return withLoading(async () => {
+      const res = await fetch("/api/activities/budget/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ requestId, userId: currentUser.id })
+      });
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.error || "Delete budget request failed");
+      }
+      await fetchState();
+      return await res.json();
+    }, "กำลังลบคำขอเบิกงบ...");
   };
 
   const handleDeleteActivity = async (activityId: string) => {
@@ -764,13 +840,13 @@ export default function App() {
     }, "กำลังส่งคำขอเบิกงบ...");
   };
 
-  const handleApproveBudget = async (requestId: string, action: "approve" | "reject", rejectReason?: string) => {
+  const handleApproveBudget = async (requestId: string, action: "approve" | "reject", rejectReason?: string, slipUrl?: string) => {
     if (!currentUser) return;
     return withLoading(async () => {
       const res = await fetch("/api/activities/budget/approve", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ requestId, treasurerId: currentUser.id, action, rejectReason })
+        body: JSON.stringify({ requestId, treasurerId: currentUser.id, action, rejectReason, slipUrl })
       });
       if (!res.ok) throw new Error("Budget approval action failed");
       await fetchState();
@@ -1233,6 +1309,7 @@ export default function App() {
               onProposeExternalIncome={handleProposeExternalIncome}
               onApproveExternalIncome={handleApproveExternalIncome}
               onUpdateActivity={handleUpdateActivity}
+              onDeleteBudgetRequest={handleDeleteBudgetRequest}
             />
           )}
 

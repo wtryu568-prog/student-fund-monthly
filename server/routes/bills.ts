@@ -13,8 +13,14 @@ const router = Router();
 
 // Create Monthly Bills
 router.post("/bills/create", asyncHandler(async (req, res) => {
-  const { month, year, dueDate, userId } = req.body;
-  if (!month || !year || !dueDate || !userId) return res.status(400).json({ error: "Missing required parameters" });
+  const month = req.body.month !== undefined ? Number(req.body.month) : undefined;
+  const year = req.body.year !== undefined ? Number(req.body.year) : undefined;
+  const dueDate = req.body.dueDate || req.body.due_date || req.body.duedate || "สิ้นเดือน";
+  const userId = req.body.userId || req.body.user_id || "system";
+
+  if (month === undefined || year === undefined || isNaN(month) || isNaN(year)) {
+    return res.status(400).json({ error: "กรุณาระบุเดือนและปีของรอบบิลให้ถูกต้องค่ะ" });
+  }
 
   const { data: activeStudents } = await supabase.from("users").select("*").eq("is_active", true);
   const { data: existingBills } = await supabase.from("monthly_bills").select("user_id").eq("month", Number(month)).eq("year", Number(year));
@@ -50,8 +56,13 @@ router.post("/bills/create", asyncHandler(async (req, res) => {
 
 // Delete bills cycle
 router.post("/bills/delete-cycle", asyncHandler(async (req, res) => {
-  const { month, year, userId } = req.body;
-  if (!month || !year || !userId) return res.status(400).json({ error: "Missing required parameters" });
+  const month = req.body.month !== undefined ? Number(req.body.month) : undefined;
+  const year = req.body.year !== undefined ? Number(req.body.year) : undefined;
+  const userId = req.body.userId || req.body.user_id || "system";
+
+  if (month === undefined || year === undefined || isNaN(month) || isNaN(year)) {
+    return res.status(400).json({ error: "กรุณาระบุเดือนและปีของรอบบิลที่ต้องการลบค่ะ" });
+  }
 
   const { data: billsToDelete } = await supabase.from("monthly_bills").select("id").eq("month", Number(month)).eq("year", Number(year));
   if (!billsToDelete || billsToDelete.length === 0) return res.status(444).json({ error: "ไม่พบบิลของเดือนและปีที่ระบุในระบบ" });

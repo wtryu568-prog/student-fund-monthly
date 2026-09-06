@@ -135,15 +135,16 @@ interface ActivitiesProps {
   onProposeActivity: (title: string, description: string, eventDate: string, location: string, budgetEstimated: number, documentUrls?: string[]) => Promise<{ activity: Activity }>;
   onApproveActivity: (activityId: string, action: "approve" | "reject", rejectReason?: string, budgetApproved?: number) => Promise<{ activity: Activity }>;
   onProposeBudget: (activityId: string, title: string, amount: number, reason: string, details?: string, documentUrls?: string[]) => Promise<unknown>;
-  onApproveBudget: (requestId: string, action: "approve" | "reject", rejectReason?: string) => Promise<unknown>;
+  onApproveBudget: (requestId: string, action: "approve" | "reject", rejectReason?: string, slipUrl?: string) => Promise<unknown>;
   onDeleteActivity: (activityId: string) => Promise<unknown>;
   onProposeSettlement?: (activityId: string, actualExpense: number, refundAmount: number, refundSlipUrl?: string, expenseReceipts?: string[]) => Promise<{ activity: Activity }>;
   onApproveSettlement?: (activityId: string, action: "approve" | "reject", rejectReason?: string) => Promise<{ activity: Activity }>;
   onProposeBudgetExpansion?: (activityId: string, originalRequestId: string, amount: number, reason: string) => Promise<unknown>;
-  onApproveBudgetExpansion?: (requestId: string, action: "approve" | "reject", rejectReason?: string) => Promise<unknown>;
+  onApproveBudgetExpansion?: (requestId: string, action: "approve" | "reject", rejectReason?: string, slipUrl?: string) => Promise<unknown>;
   onProposeExternalIncome?: (activityId: string, amount: number, source: string, slipUrl?: string) => Promise<{ activity: Activity }>;
   onApproveExternalIncome?: (activityId: string, incomeId: string, action: "approve" | "reject", rejectReason?: string) => Promise<{ activity: Activity }>;
   onUpdateActivity?: (activityId: string, updatedData: any) => Promise<{ activity: Activity }>;
+  onDeleteBudgetRequest?: (requestId: string) => Promise<unknown>;
 }
 
 export default function Activities({
@@ -163,7 +164,8 @@ export default function Activities({
   onApproveBudgetExpansion,
   onProposeExternalIncome,
   onApproveExternalIncome,
-  onUpdateActivity
+  onUpdateActivity,
+  onDeleteBudgetRequest
 }: ActivitiesProps) {
   const [selectedActivity, setSelectedActivity] = useState<Activity | null>(activities[0] || null);
 
@@ -189,6 +191,63 @@ export default function Activities({
   const [externalIncomeSlipUrl, setExternalIncomeSlipUrl] = useState<string>("");
   const [isSubmittingExternalIncome, setIsSubmittingExternalIncome] = useState<boolean>(false);
   const [isReviewingExternalIncome, setIsReviewingExternalIncome] = useState<boolean>(false);
+
+  const [showApprovalSlipModal, setShowApprovalSlipModal] = useState<boolean>(false);
+  const [approvalRequestId, setApprovalRequestId] = useState<string | null>(null);
+  const [approvalSlipUrl, setApprovalSlipUrl] = useState<string>("");
+  const [approvalSlipLink, setApprovalSlipLink] = useState<string>("");
+
+  const [budgetRequestToDelete, setBudgetRequestToDelete] = useState<string | null>(null);
+  const [isDeletingBudgetRequest, setIsDeletingBudgetRequest] = useState<boolean>(false);
+
+  const handleApprovalSlipFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        const compressed = await compressImage(reader.result as string, 800, 0.6);
+        setApprovalSlipUrl(compressed);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleConfirmApprovalWithSlip = async () => {
+    if (!approvalRequestId || isReviewingBudget) return;
+    setIsReviewingBudget(true);
+    try {
+      const req = budgetRequests.find(r => r.id === approvalRequestId);
+      const isExp = req?.isExpansion;
+      const finalSlipUrl = approvalSlipUrl || approvalSlipLink.trim() || "";
+
+      if (isExp && onApproveBudgetExpansion) {
+        await onApproveBudgetExpansion(approvalRequestId, "approve", undefined, finalSlipUrl);
+      } else {
+        await onApproveBudget(approvalRequestId, "approve", undefined, finalSlipUrl);
+      }
+      setShowApprovalSlipModal(false);
+      setApprovalRequestId(null);
+      setApprovalSlipUrl("");
+      setApprovalSlipLink("");
+    } catch (err: any) {
+      alert(err.message || "เกิดข้อผิดพลาดในการอนุมัติเบิกงบ");
+    } finally {
+      setIsReviewingBudget(false);
+    }
+  };
+
+  const handleConfirmDeleteBudgetRequest = async () => {
+    if (!budgetRequestToDelete || !onDeleteBudgetRequest || isDeletingBudgetRequest) return;
+    setIsDeletingBudgetRequest(true);
+    try {
+      await onDeleteBudgetRequest(budgetRequestToDelete);
+      setBudgetRequestToDelete(null);
+    } catch (err: any) {
+      alert(err.message || "เกิดข้อผิดพลาดในการลบคำขอเบิกงบประมาณ");
+    } finally {
+      setIsDeletingBudgetRequest(false);
+    }
+  };
 
   const [activityToDelete, setActivityToDelete] = useState<string | null>(null);
 
@@ -1052,6 +1111,14 @@ export default function Activities({
 
   const handleApproveBudgetClick = async (requestId: string, action: "approve" | "reject") => {
     if (isReviewingBudget) return;
+    if (action === "approve") {
+      setApprovalRequestId(requestId);
+      setApprovalSlipUrl("");
+      setApprovalSlipLink("");
+      setShowApprovalSlipModal(true);
+      return;
+    }
+
     if (action === "reject" && !rejectReason) {
       setShowRejectInput(`bud_${requestId}`);
       return;
@@ -1066,13 +1133,13 @@ export default function Activities({
         await onApproveBudgetExpansion(
           requestId,
           action,
-          action === "reject" ? rejectReason : undefined
+          rejectReason
         );
       } else {
         await onApproveBudget(
           requestId,
           action,
-          action === "reject" ? rejectReason : undefined
+          rejectReason
         );
       }
       setRejectReason("");
@@ -1673,7 +1740,20 @@ export default function Activities({
                               </span>
                             )}
                           </h4>
-                          {getBudgetStatusBadge(req.status)}
+                          <div className="flex items-center gap-2">
+                            {getBudgetStatusBadge(req.status)}
+                            {(currentUser.role === "treasurer" || currentUser.role === "committee" || currentUser.id === req.requestedBy) && (
+                              <button
+                                type="button"
+                                onClick={() => setBudgetRequestToDelete(req.id)}
+                                className="text-rose-500 hover:text-rose-700 hover:bg-rose-50 px-2 py-1 rounded-lg transition-all text-[11px] flex items-center gap-1 font-sans border border-rose-200 cursor-pointer shrink-0"
+                                title="ลบคำขอเบิกงบนี้"
+                              >
+                                <Trash2 size={12} />
+                                <span>ลบคำขอ</span>
+                              </button>
+                            )}
+                          </div>
                         </div>
                         <p className="text-slate-500 leading-relaxed font-sans">{req.reason}</p>
                         <div className="flex items-center justify-between text-[11px] pt-1">
@@ -2785,6 +2865,151 @@ export default function Activities({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Treasurer Approval with Slip Attachment */}
+      {showApprovalSlipModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">
+          <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl border border-slate-100 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="font-bold text-sm text-slate-800 flex items-center gap-1.5 font-display">
+                <Paperclip size={18} className="text-emerald-600" /> แนบสลิปการโอนเงินเพื่ออนุมัติ
+              </h3>
+              <button 
+                type="button" 
+                onClick={() => {
+                  setShowApprovalSlipModal(false);
+                  setApprovalRequestId(null);
+                  setApprovalSlipUrl("");
+                  setApprovalSlipLink("");
+                }}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="space-y-4 text-xs font-sans">
+              {(() => {
+                const req = budgetRequests.find(r => r.id === approvalRequestId);
+                return req ? (
+                  <div className="p-3 bg-emerald-50/60 border border-emerald-100 rounded-xl space-y-1">
+                    <p className="font-bold text-slate-800">{req.title}</p>
+                    <p className="text-emerald-700 font-mono font-bold">ยอดโอนจ่าย: ฿{req.amount.toLocaleString()} บาท</p>
+                  </div>
+                ) : null;
+              })()}
+
+              <div className="space-y-1">
+                <label className="block font-bold text-slate-600">อัปโหลดสลิปการโอนเงิน (สลิปธนาคาร / หลักฐานโอนเงิน)</label>
+                <div className="border-2 border-dashed border-slate-200 rounded-2xl p-3 text-center bg-white hover:bg-slate-50 cursor-pointer relative transition-all">
+                  <input 
+                    type="file" 
+                    accept="image/*"
+                    onChange={handleApprovalSlipFileChange}
+                    className="absolute inset-0 opacity-0 cursor-pointer"
+                  />
+                  {approvalSlipUrl ? (
+                    <div className="flex items-center gap-2 justify-center">
+                      <img src={approvalSlipUrl} className="w-10 h-10 object-cover rounded-lg border border-slate-200" />
+                      <span className="text-[11px] font-bold text-emerald-600">อัปโหลดสลิปเรียบร้อยแล้ว</span>
+                    </div>
+                  ) : (
+                    <p className="text-[11px] font-semibold text-slate-500">📷 คลิกเพื่อเลือกรูปสลิปการโอนเงิน</p>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="block font-bold text-slate-600">หรือระบุลิงก์รูปสลิปจาก Google Drive (ถ้ามี)</label>
+                <input 
+                  type="url"
+                  placeholder="https://drive.google.com/..."
+                  value={approvalSlipLink}
+                  onChange={(e) => setApprovalSlipLink(e.target.value)}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none"
+                />
+              </div>
+
+              {/* Preconfigured mock slips for easy evaluation */}
+              <div className="space-y-1 mt-2">
+                <p className="text-[10px] text-slate-400 font-bold font-sans">หรือเลือกรูปสลิปจำลองสำหรับทดสอบ:</p>
+                <div className="grid grid-cols-3 gap-1">
+                  {mockReceipts.map((rc, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setApprovalSlipUrl(rc.url)}
+                      className="text-[9px] bg-slate-100 hover:bg-emerald-50 text-slate-600 hover:text-emerald-700 py-1.5 px-1 rounded-lg border border-slate-200 hover:border-emerald-200 font-medium truncate transition-all text-center cursor-pointer"
+                      title={rc.name}
+                    >
+                      📎 สลิปจำลอง {idx + 1}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                <button 
+                  type="button" 
+                  onClick={() => {
+                    setShowApprovalSlipModal(false);
+                    setApprovalRequestId(null);
+                    setApprovalSlipUrl("");
+                    setApprovalSlipLink("");
+                  }}
+                  disabled={isReviewingBudget}
+                  className="bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold px-4 py-2 rounded-xl transition-all cursor-pointer font-sans"
+                >
+                  ยกเลิก
+                </button>
+                <button 
+                  type="button"
+                  onClick={handleConfirmApprovalWithSlip}
+                  disabled={isReviewingBudget}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2 rounded-xl shadow-md transition-all cursor-pointer font-sans"
+                >
+                  {isReviewingBudget ? "กำลังโอนและอนุมัติ..." : "อนุมัติและโอนเงินเบิก"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Delete Budget Request Confirmation */}
+      {budgetRequestToDelete && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">
+          <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl border border-slate-100 space-y-4 text-center">
+            <div className="w-12 h-12 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto">
+              <Trash2 size={24} />
+            </div>
+            <div className="space-y-1">
+              <h3 className="font-bold text-sm text-slate-800 font-display">ยืนยันการลบคำขอเบิกงบประมาณ?</h3>
+              <p className="text-xs text-slate-500 font-sans leading-relaxed">
+                หากคำขอนี้ได้รับการอนุมัติแล้ว ระบบจะทำการยกเลิกรายการจ่ายและคืนงบประมาณเข้ากองทุนให้อัตโนมัติค่ะ
+              </p>
+            </div>
+            <div className="flex justify-center gap-2 pt-2">
+              <button 
+                type="button"
+                onClick={() => setBudgetRequestToDelete(null)}
+                disabled={isDeletingBudgetRequest}
+                className="bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold px-4 py-2 rounded-xl text-xs transition-all cursor-pointer font-sans"
+              >
+                ยกเลิก
+              </button>
+              <button 
+                type="button"
+                onClick={handleConfirmDeleteBudgetRequest}
+                disabled={isDeletingBudgetRequest}
+                className="bg-rose-600 hover:bg-rose-700 text-white font-bold px-4 py-2 rounded-xl text-xs shadow-md transition-all cursor-pointer font-sans"
+              >
+                {isDeletingBudgetRequest ? "กำลังลบ..." : "ยืนยันลบคำขอ"}
+              </button>
+            </div>
           </div>
         </div>
       )}
