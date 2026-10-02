@@ -824,18 +824,26 @@ export default function Activities({
                   </tr>
                 </thead>
                 <tbody>
-                  ${itemizedList.map((item, idx) => `
-                    <tr>
-                      <td style="padding: 10px 12px; border-bottom: 1px solid #e2e8f0;">
-                        <strong>${idx + 1}. ${item.itemName}</strong>
-                        <br/><small style="color:#64748b;">บันทึกโดย: ${users.find(u => u.id === item.createdBy)?.fullName || "สมาชิก"}</small>
-                      </td>
-                      <td style="padding: 10px 12px; border-bottom: 1px solid #e2e8f0; text-align:right; font-weight:bold; color:#b91c1c;">฿${item.amount.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
-                      <td style="padding: 10px 12px; border-bottom: 1px solid #e2e8f0; text-align:center;">
-                        ${item.receiptUrl ? renderPdfThumbnail(item.receiptUrl, 50) : `<span style="color:#94a3b8; font-size: 10px;">ไม่มีรูปใบเสร็จ</span>`}
-                      </td>
-                    </tr>
-                  `).join("")}
+                  ${itemizedList.map((item, idx) => {
+                    const itemName = item.itemName || (item as any).item_name || (item as any).name || (item as any).title || "รายการซื้อของ/สินค้า";
+                    const creatorId = item.createdBy || (item as any).created_by;
+                    const creatorName = users.find(u => u.id === creatorId)?.fullName || "สมาชิก";
+                    const receiptUrl = item.receiptUrl || (item as any).receipt_url;
+                    const itemAmt = Number(item.amount || 0);
+
+                    return `
+                      <tr>
+                        <td style="padding: 10px 12px; border-bottom: 1px solid #e2e8f0;">
+                          <strong>${idx + 1}. ${itemName}</strong>
+                          <br/><small style="color:#64748b;">บันทึกโดย: ${creatorName}</small>
+                        </td>
+                        <td style="padding: 10px 12px; border-bottom: 1px solid #e2e8f0; text-align:right; font-weight:bold; color:#b91c1c;">฿${itemAmt.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                        <td style="padding: 10px 12px; border-bottom: 1px solid #e2e8f0; text-align:center;">
+                          ${receiptUrl ? renderPdfThumbnail(receiptUrl, 50) : `<span style="color:#94a3b8; font-size: 10px;">ไม่มีรูปใบเสร็จ</span>`}
+                        </td>
+                      </tr>
+                    `;
+                  }).join("")}
                 </tbody>
               </table>
             `;
