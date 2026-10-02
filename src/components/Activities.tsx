@@ -18,7 +18,10 @@ import {
   Paperclip,
   Trash2,
   X,
-  Edit
+  Edit,
+  Receipt,
+  Upload,
+  TrendingUp
 } from "lucide-react";
 import { User, Activity, BudgetRequest, SystemSettings } from "../types";
 import { compressImage } from "../utils/imageCompressor";
@@ -60,21 +63,21 @@ function ProjectProgressSteps({ status }: ProjectProgressStepsProps) {
   const steps = [
     {
       step: 1,
-      title: "เสนอโครงการ",
-      desc: "ยื่นแผน วัตถุประสงค์ และเสนอเบิกงบเบื้องต้น",
-      badge: "เสนอรายละเอียดโครงการ",
+      title: "1. เบิกเงินทำโครงการ / เบิกเพิ่ม",
+      desc: "เสนอขอเบิกเงินงบประมาณ และยื่นเบิกเพิ่มกรณีงบไม่พอ",
+      badge: "เบิกงบ & ขอขยายงบ",
     },
     {
       step: 2,
-      title: "ดำเนินงาน",
-      desc: "จัดโครงการ เบิกเงินย่อย / ขอขยายงบเพิ่มเติม",
-      badge: "เบิกเงิน & แนบสลิปผ่าน Google Drive",
+      title: "2. ซื้อของใช้อะไรบ้าง + สลิป/บิล",
+      desc: "บันทึกรายการสินค้าที่ซื้อจริง พร้อมแนบรูปบิลใบเสร็จ",
+      badge: "บันทึกซื้อของ & แนบบิล",
     },
     {
       step: 3,
-      title: "เสร็จสิ้น",
-      desc: "สรุปยอดจ่ายจริง คืนเงินทอน และสร้างสรุป PDF",
-      badge: "สรุปผลโปร่งใส ตรวจสอบได้",
+      title: "3. คืนเงินทอนเข้ากองทุนหลัก",
+      desc: "สรุปยอดใช้จริง และโอนคืนเงินทอนกลับกองทุนกลาง",
+      badge: "โอนเงินทอนคืนกองหลัก",
     }
   ];
 
@@ -145,6 +148,8 @@ interface ActivitiesProps {
   onApproveExternalIncome?: (activityId: string, incomeId: string, action: "approve" | "reject", rejectReason?: string) => Promise<{ activity: Activity }>;
   onUpdateActivity?: (activityId: string, updatedData: any) => Promise<{ activity: Activity }>;
   onDeleteBudgetRequest?: (requestId: string) => Promise<unknown>;
+  onAddExpenseItem?: (activityId: string, itemName: string, amount: number, receiptUrl?: string) => Promise<{ activity: Activity }>;
+  onDeleteExpenseItem?: (activityId: string, expenseId: string) => Promise<{ activity: Activity }>;
 }
 
 export default function Activities({
@@ -165,7 +170,9 @@ export default function Activities({
   onProposeExternalIncome,
   onApproveExternalIncome,
   onUpdateActivity,
-  onDeleteBudgetRequest
+  onDeleteBudgetRequest,
+  onAddExpenseItem,
+  onDeleteExpenseItem
 }: ActivitiesProps) {
   const [selectedActivity, setSelectedActivity] = useState<Activity | null>(activities[0] || null);
 
@@ -199,6 +206,67 @@ export default function Activities({
 
   const [budgetRequestToDelete, setBudgetRequestToDelete] = useState<string | null>(null);
   const [isDeletingBudgetRequest, setIsDeletingBudgetRequest] = useState<boolean>(false);
+
+  const [showAddExpenseModal, setShowAddExpenseModal] = useState<boolean>(false);
+  const [expenseItemName, setExpenseItemName] = useState<string>("");
+  const [expenseAmount, setExpenseAmount] = useState<string>("");
+  const [expenseReceiptUrl, setExpenseReceiptUrl] = useState<string>("");
+  const [isAddingExpense, setIsAddingExpense] = useState<boolean>(false);
+
+  const handleExpenseReceiptFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      const reader = new FileReader();
+      reader.onloadend = async () => {
+        const compressed = await compressImage(reader.result as string, 900, 0.7);
+        setExpenseReceiptUrl(compressed);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleConfirmAddExpense = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedActivity || !onAddExpenseItem || isAddingExpense) return;
+    if (!expenseItemName.trim()) {
+      alert("กรุณาระบุชื่อรายการซื้อของ/ค่าใช้จ่าย");
+      return;
+    }
+    const numAmt = parseFloat(expenseAmount);
+    if (isNaN(numAmt) || numAmt <= 0) {
+      alert("กรุณาระบุจำนวนเงินที่ถูกต้อง (มากกว่า 0 บาท)");
+      return;
+    }
+
+    setIsAddingExpense(true);
+    try {
+      const result = await onAddExpenseItem(selectedActivity.id, expenseItemName.trim(), numAmt, expenseReceiptUrl);
+      if (result && result.activity) {
+        setSelectedActivity(result.activity);
+      }
+      setShowAddExpenseModal(false);
+      setExpenseItemName("");
+      setExpenseAmount("");
+      setExpenseReceiptUrl("");
+    } catch (err: any) {
+      alert(err.message || "เกิดข้อผิดพลาดในการบันทึกรายการใบเสร็จ");
+    } finally {
+      setIsAddingExpense(false);
+    }
+  };
+
+  const handleConfirmDeleteExpense = async (expenseId: string) => {
+    if (!selectedActivity || !onDeleteExpenseItem) return;
+    if (!confirm("ยืนยันการลบรายการค่าใช้จ่ายและใบเสร็จนี้ใช่หรือไม่?")) return;
+    try {
+      const result = await onDeleteExpenseItem(selectedActivity.id, expenseId);
+      if (result && result.activity) {
+        setSelectedActivity(result.activity);
+      }
+    } catch (err: any) {
+      alert(err.message || "เกิดข้อผิดพลาดในการลบรายการ");
+    }
+  };
 
   const handleApprovalSlipFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -456,10 +524,15 @@ export default function Activities({
       .filter(r => r.status === "approved")
       .flatMap(r => r.documentUrls || []);
 
-    const allReceipts = [
+    const itemizedReceipts = (selectedActivity.itemizedExpenses || [])
+      .map(i => i.receiptUrl)
+      .filter(Boolean) as string[];
+
+    const allReceipts = Array.from(new Set([
       ...budgetReceipts,
+      ...itemizedReceipts,
       ...(selectedActivity.expenseReceipts || [])
-    ];
+    ]));
 
     let receiptsHtml = "";
     if (allReceipts.length === 0) {
@@ -734,20 +807,68 @@ export default function Activities({
             </tr>
           </table>
 
-          <div class="section-title">📋 เอกสารเสนอโครงการและเอกสารแนบ (Project Proposal Documents)</div>
-          ${proposalDocsHtml}
-
-          <div class="section-title">📊 รายการเบิกจ่ายงบประมาณ (Budget Requests)</div>
+          <div class="section-title">📋 1. รายการเบิกเงินทำโครงการและเบิกเงินเพิ่ม (Project Budget & Expansion Requests)</div>
           ${budgetRequestsHtml}
 
-          <div class="section-title">📥 รายการเงินสนับสนุนและรายรับเพิ่มเติม (External Sponsorship & Additional Revenues)</div>
+          <div class="section-title">🛒 2. รายการซื้อของใช้อะไรบ้างและใบเสร็จจ่ายจริง (Itemized Expenses & Receipts)</div>
+          ${(() => {
+            const itemizedList = selectedActivity.itemizedExpenses || [];
+            if (itemizedList.length === 0) return `<p style="color:#888; font-style:italic;">ไม่มีรายการบันทึกซื้อของ/ใบเสร็จย่อย</p>`;
+            return `
+              <table style="width: 100%; border-collapse: collapse; margin-bottom: 25px;">
+                <thead>
+                  <tr>
+                    <th style="background: #f1f5f9; padding: 10px 12px; text-align: left; border-bottom: 2px solid #cbd5e1; font-weight: bold; color: #475569; width: 45%;">รายการซื้อของ/สินค้า</th>
+                    <th style="background: #f1f5f9; padding: 10px 12px; text-align: right; border-bottom: 2px solid #cbd5e1; font-weight: bold; color: #475569; width: 25%;">จำนวนเงิน (บาท)</th>
+                    <th style="background: #f1f5f9; padding: 10px 12px; text-align: center; border-bottom: 2px solid #cbd5e1; font-weight: bold; color: #475569; width: 30%;">ใบเสร็จประกอบ</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${itemizedList.map((item, idx) => `
+                    <tr>
+                      <td style="padding: 10px 12px; border-bottom: 1px solid #e2e8f0;">
+                        <strong>${idx + 1}. ${item.itemName}</strong>
+                        <br/><small style="color:#64748b;">บันทึกโดย: ${users.find(u => u.id === item.createdBy)?.fullName || "สมาชิก"}</small>
+                      </td>
+                      <td style="padding: 10px 12px; border-bottom: 1px solid #e2e8f0; text-align:right; font-weight:bold; color:#b91c1c;">฿${item.amount.toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                      <td style="padding: 10px 12px; border-bottom: 1px solid #e2e8f0; text-align:center;">
+                        ${item.receiptUrl ? renderPdfThumbnail(item.receiptUrl, 50) : `<span style="color:#94a3b8; font-size: 10px;">ไม่มีรูปใบเสร็จ</span>`}
+                      </td>
+                    </tr>
+                  `).join("")}
+                </tbody>
+              </table>
+            `;
+          })()}
+
+          <div class="section-title">💸 3. รายการสรุปเงินคงเหลือคืนกองทุนหลักและสลิปโอนเงินทอน (Refund & Settlement to Main Fund)</div>
+          ${refundSlipHtml}
+
+          <div class="section-title">📁 4. เอกสารเสนอโครงการและเอกสารแนบ (Project Proposal Documents)</div>
+          ${proposalDocsHtml}
+
+          <div class="section-title">📥 5. รายการเงินสนับสนุนและรายรับเพิ่มเติม (External Sponsorship & Additional Revenues)</div>
           ${externalIncomesHtml}
 
-          <div class="section-title">🧾 รูปภาพบิลใบเสร็จและหลักฐานการจ่ายเงิน (Receipt Documents)</div>
+          <div class="section-title">🧾 6. รูปภาพบิลใบเสร็จและหลักฐานการจ่ายเงินทั้งหมด (Receipt Document Attachments)</div>
           ${receiptsHtml}
 
-          <div class="section-title">💸 รูปภาพสลิปโอนคืนเงินทอน (Refund Slip Document)</div>
-          ${refundSlipHtml}
+          <div style="margin-top: 45px; page-break-inside: avoid;">
+            <table style="width: 100%; border-collapse: collapse; border: none; margin-bottom: 0;">
+              <tr>
+                <td style="width: 50%; text-align: center; border: none; padding: 15px;">
+                  <div style="border-bottom: 1px dashed #94a3b8; width: 180px; margin: 0 auto 8px auto;"></div>
+                  <strong style="font-size: 12px; color: #334155;">(${users.find(u => u.id === selectedActivity.proposedBy)?.fullName || "ผู้เสนอโครงการ"})</strong>
+                  <br/><span style="font-size: 11px; color: #64748b;">ผู้เสนอโครงการ / ผู้รับผิดชอบ</span>
+                </td>
+                <td style="width: 50%; text-align: center; border: none; padding: 15px;">
+                  <div style="border-bottom: 1px dashed #94a3b8; width: 180px; margin: 0 auto 8px auto;"></div>
+                  <strong style="font-size: 12px; color: #334155;">(${users.find(u => u.id === selectedActivity.settledBy || u.role === "treasurer")?.fullName || "เหรัญญิก"})</strong>
+                  <br/><span style="font-size: 11px; color: #64748b;">เหรัญญิก / ผู้ตรวจสอบและปิดบัญชี</span>
+                </td>
+              </tr>
+            </table>
+          </div>
 
           <div class="footer-note">
             จัดพิมพ์เอกสารรายงานอิเล็กทรอนิกส์สรุปโครงการสำเร็จรูป ณ วันที่ ${new Date().toLocaleDateString("th-TH")} เวลา ${new Date().toLocaleTimeString("th-TH")} น.
@@ -1153,12 +1274,14 @@ export default function Activities({
 
   const handleProposeExpansionSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedActivity || !selectedOriginalRequest || !onProposeBudgetExpansion || isSubmittingExpansion || !expansionAmount) return;
+    const targetReq = selectedOriginalRequest || budgetRequests.find(r => r.activityId === selectedActivity?.id && r.status === "approved");
+    const targetReqId = targetReq ? targetReq.id : selectedActivity?.id || "";
+    if (!selectedActivity || !onProposeBudgetExpansion || isSubmittingExpansion || !expansionAmount) return;
     setIsSubmittingExpansion(true);
     try {
       await onProposeBudgetExpansion(
         selectedActivity.id,
-        selectedOriginalRequest.id,
+        targetReqId,
         Number(expansionAmount),
         expansionReason
       );
@@ -1418,14 +1541,57 @@ export default function Activities({
                   </div>
                   <p className="text-xs text-slate-500 mt-1">{selectedActivity.description || "ไม่มีรายละเอียดประกอบโครงการ"}</p>
                 </div>
-                <div className="flex items-center gap-2">
-                  {selectedActivity.status === "completed" && (
+                <div className="flex flex-wrap items-center gap-2">
+                  {["approved", "in_progress"].includes(selectedActivity.status) && (
+                    <button
+                      type="button"
+                      onClick={() => setShowBudgetModal(true)}
+                      className="bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl text-xs px-3 py-2 flex items-center gap-1 transition-all shadow-sm cursor-pointer shrink-0"
+                      title="ยื่นขอเบิกงบประมาณทำโครงการ"
+                    >
+                      <Plus size={14} />
+                      <span>➕ เบิกงบทำโครงการ</span>
+                    </button>
+                  )}
+                  {["approved", "in_progress"].includes(selectedActivity.status) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSelectedOriginalRequest(null);
+                        setExpansionAmount("");
+                        setExpansionReason("");
+                        setShowExpansionModal(true);
+                      }}
+                      className="bg-purple-600 hover:bg-purple-700 text-white font-bold rounded-xl text-xs px-3 py-2 flex items-center gap-1 transition-all shadow-sm cursor-pointer shrink-0"
+                      title="ขอขยายวงเงินงบประมาณเพิ่มเติมกรณีเงินไม่พอจ่าย"
+                    >
+                      <TrendingUp size={14} />
+                      <span>📈 ขอขยายงบเพิ่ม</span>
+                    </button>
+                  )}
+                  {["approved", "in_progress"].includes(selectedActivity.status) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSettleActualExpense("");
+                        setSettleRefundSlip(null);
+                        setSettleReceipts([]);
+                        setSettleError(null);
+                        setShowSettleModal(true);
+                      }}
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs px-3 py-2 flex items-center gap-1 transition-all shadow-sm cursor-pointer shrink-0"
+                      title="บันทึกสรุปงานและส่งสลิปเงินทอนคืนกองทุนหลัก"
+                    >
+                      ✍️ ปิดงาน & ส่งเงินทอน
+                    </button>
+                  )}
+                  {["approved", "in_progress", "pending_settlement", "completed"].includes(selectedActivity.status) && (
                     <button 
                       onClick={handleExportActivityPDF}
-                      className="bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold rounded-xl text-xs px-3 py-2 flex items-center gap-1 transition-all border border-blue-200 cursor-pointer shadow-xs shrink-0"
+                      className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs px-3 py-2 flex items-center gap-1 transition-all border border-slate-200 cursor-pointer shadow-xs shrink-0"
                       title="ดาวน์โหลดสรุปผลและใบเสร็จทั้งหมดเป็น PDF"
                     >
-                      📄 PDF / พิมพ์สรุปงาน
+                      📄 พิมพ์สรุปงาน PDF
                     </button>
                   )}
                   {getActivityStatusBadge(selectedActivity.status)}
@@ -1434,6 +1600,36 @@ export default function Activities({
 
               {/* Progress Steps for 3 logical phases requested by user */}
               <ProjectProgressSteps status={selectedActivity.status} />
+
+              {/* 4 Financial Summary Cards */}
+              {(() => {
+                const approvedRequests = budgetRequests.filter(r => r.activityId === selectedActivity.id && r.status === "approved");
+                const totalDrawn = approvedRequests.reduce((sum, r) => sum + r.amount, 0);
+                const budgetApproved = selectedActivity.budgetApproved || selectedActivity.budgetEstimated || 0;
+                const actualSpent = selectedActivity.actualExpense || 0;
+                const netRefund = Math.max(0, totalDrawn - actualSpent);
+
+                return (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-sans">
+                    <div className="p-3.5 bg-blue-50/60 border border-blue-100 rounded-2xl">
+                      <span className="block text-[10px] font-bold text-blue-600 uppercase tracking-wider">งบอนุมัติรวม</span>
+                      <strong className="text-sm font-extrabold text-blue-900 mt-0.5 block">฿{budgetApproved.toLocaleString()}</strong>
+                    </div>
+                    <div className="p-3.5 bg-indigo-50/60 border border-indigo-100 rounded-2xl">
+                      <span className="block text-[10px] font-bold text-indigo-600 uppercase tracking-wider">ยอดเบิกจ่ายไปแล้ว</span>
+                      <strong className="text-sm font-extrabold text-indigo-900 mt-0.5 block">฿{totalDrawn.toLocaleString()}</strong>
+                    </div>
+                    <div className="p-3.5 bg-rose-50/60 border border-rose-100 rounded-2xl">
+                      <span className="block text-[10px] font-bold text-rose-600 uppercase tracking-wider">ยอดใช้จริงจากใบเสร็จ</span>
+                      <strong className="text-sm font-extrabold text-rose-900 mt-0.5 block">฿{actualSpent.toLocaleString()}</strong>
+                    </div>
+                    <div className="p-3.5 bg-emerald-50/60 border border-emerald-100 rounded-2xl">
+                      <span className="block text-[10px] font-bold text-emerald-600 uppercase tracking-wider">เงินคงเหลือคืนกองทุน</span>
+                      <strong className="text-sm font-extrabold text-emerald-800 mt-0.5 block">฿{netRefund.toLocaleString()}</strong>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* Grid properties */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs font-sans text-slate-600">
@@ -1454,10 +1650,103 @@ export default function Activities({
                 <div className="flex items-center gap-2 p-3 bg-blue-50/50 rounded-xl">
                   <DollarSign size={16} className="text-blue-600" />
                   <div>
-                    <span className="block text-[10px] text-blue-500">งบประมาณเสนอขอ</span>
+                    <span className="block text-[10px] text-blue-500">งบประมาณประมาณการ</span>
                     <strong>฿{selectedActivity.budgetEstimated.toLocaleString()}</strong>
                   </div>
                 </div>
+              </div>
+
+              {/* Itemized Expenses & Purchase Receipts Section */}
+              <div className="bg-white border border-slate-200/80 rounded-2xl p-4 space-y-3.5 shadow-2xs">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-800 flex items-center gap-1.5 uppercase tracking-wider">
+                      2️⃣ ซื้อของใช้อะไรบ้าง & แนบสลิป/บิลใบเสร็จ (Itemized Expenses & Receipts)
+                    </h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      บันทึกรายการสินค้าที่ซื้อจริง และอัปโหลดรูปภาพใบเสร็จเพื่อความโปร่งใส
+                    </p>
+                  </div>
+
+                  {(selectedActivity.proposedBy === currentUser.id || canProposeActivity) && selectedActivity.status !== "completed" && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAddExpenseModal(true)}
+                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-1 self-start sm:self-auto"
+                    >
+                      <Plus size={14} />
+                      <span>+ เพิ่มรายการซื้อของ & ใบเสร็จ</span>
+                    </button>
+                  )}
+                </div>
+
+                {(!selectedActivity.itemizedExpenses || selectedActivity.itemizedExpenses.length === 0) ? (
+                  <div className="text-center py-6 text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                    <FileText size={24} className="mx-auto mb-1 text-slate-300" />
+                    <p className="text-xs font-semibold">ยังไม่มีรายการซื้อของย่อย</p>
+                    <p className="text-[10px] text-slate-400 mt-0.5">กดปุ่ม + เพิ่มรายการซื้อของ & ใบเสร็จ เพื่อแนบบิลสินค้า</p>
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs text-left text-slate-700 border-collapse">
+                      <thead>
+                        <tr className="bg-slate-50 text-slate-500 border-b border-slate-200 text-[11px]">
+                          <th className="p-2.5 font-bold">#</th>
+                          <th className="p-2.5 font-bold">รายการสินค้า/ค่าใช้จ่าย</th>
+                          <th className="p-2.5 font-bold text-right">จำนวนเงิน</th>
+                          <th className="p-2.5 font-bold text-center">ใบเสร็จ/รูปภาพ</th>
+                          <th className="p-2.5 font-bold text-right">ผู้บันทึก</th>
+                          <th className="p-2.5 font-bold text-center">จัดการ</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 font-sans">
+                        {selectedActivity.itemizedExpenses.map((item, idx) => {
+                          const itemName = item.itemName || (item as any).item_name || (item as any).name || (item as any).title || "รายการซื้อของ/สินค้า";
+                          const receiptUrl = item.receiptUrl || (item as any).receipt_url;
+                          const creatorId = item.createdBy || (item as any).created_by;
+                          const creatorName = users.find(u => u.id === creatorId)?.fullName || "สมาชิก";
+
+                          return (
+                            <tr key={item.id || idx} className="hover:bg-slate-50/70 transition-colors">
+                              <td className="p-2.5 text-slate-400 font-mono text-[10px]">{idx + 1}</td>
+                              <td className="p-2.5 font-bold text-slate-800">{itemName}</td>
+                              <td className="p-2.5 text-right font-extrabold text-rose-700">฿{Number(item.amount || 0).toLocaleString(undefined, {minimumFractionDigits: 2})}</td>
+                              <td className="p-2.5 text-center">
+                                {receiptUrl ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handlePreviewImage(receiptUrl)}
+                                    className="inline-flex items-center gap-1 text-[10px] font-bold text-blue-600 bg-blue-50 border border-blue-100 hover:bg-blue-100 px-2 py-1 rounded-lg transition-colors"
+                                  >
+                                    {renderAttachmentThumbnail(receiptUrl, "receipt")}
+                                    <span>เปิดดู</span>
+                                  </button>
+                                ) : (
+                                  <span className="text-[10px] text-slate-400">ไม่มีรูป</span>
+                                )}
+                              </td>
+                              <td className="p-2.5 text-right text-[11px] text-slate-500">
+                                {creatorName}
+                              </td>
+                              <td className="p-2.5 text-center">
+                                {(selectedActivity.proposedBy === currentUser.id || canProposeActivity) && selectedActivity.status !== "completed" && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleConfirmDeleteExpense(item.id)}
+                                    className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
+                                    title="ลบรายการนี้"
+                                  >
+                                    <Trash2 size={14} />
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
               </div>
 
               {/* Activity document attachments */}
@@ -1483,10 +1772,10 @@ export default function Activities({
               )}
 
               {/* Settlement Section (คืนเงินทอน & สรุปยอดจ่ายจริง) */}
-              {selectedActivity.status === "in_progress" && (
+              {["approved", "in_progress"].includes(selectedActivity.status) && (
                 <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl text-xs space-y-3">
-                  <h4 className="font-bold text-slate-700 flex items-center gap-1.5">
-                    <DollarSign size={16} className="text-indigo-600" /> สรุปข้อมูลโครงการ & คืนเงินทอน
+                  <h4 className="font-bold text-slate-800 flex items-center gap-1.5">
+                    <DollarSign size={16} className="text-indigo-600" /> 3️⃣ สรุปเงินคงเหลือคืนกองทุนหลัก & โอนเงินทอน (Settlement & Refund Back to Main Fund)
                   </h4>
                   {(() => {
                     const approvedBudgets = budgetRequests.filter(r => r.activityId === selectedActivity.id && r.status === "approved");
@@ -1710,17 +1999,24 @@ export default function Activities({
 
               {/* Budget request logs for the selected activity */}
               <div className="space-y-4 pt-4 border-t border-slate-100">
-                <div className="flex items-center justify-between">
-                  <h3 className="font-bold text-sm text-slate-800">คำขอเบิกเงินงบประมาณสัญญาย่อย</h3>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h3 className="font-bold text-sm text-slate-800 flex items-center gap-1.5">
+                      1️⃣ เบิกเงินทำโครงการ & ขอเบิกเงินเพิ่ม (Project Budget & Extension Requests)
+                    </h3>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      ยื่นขอเบิกเงินงบประมาณโครงการเพื่อไปดำเนินงาน หรือยื่นขอเบิกเงินขยายงบเพิ่มเติมกรณีเงินไม่พอจ่าย
+                    </p>
+                  </div>
                   {(selectedActivity.status === "approved" || selectedActivity.status === "in_progress") && 
                    (currentUser.role === "treasurer" || 
                     currentUser.role === "committee" || 
                     selectedActivity.proposedBy === currentUser.id) && (
                     <button 
                       onClick={() => setShowBudgetModal(true)}
-                      className="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 font-semibold rounded-xl text-xs px-3 py-1.5 flex items-center gap-1 transition-all"
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl text-xs px-3 py-1.5 flex items-center gap-1 transition-all shadow-xs shrink-0 self-start sm:self-auto"
                     >
-                      <Plus size={14} /> เบิกงบประมาณก้อนย่อย
+                      <Plus size={14} /> + เบิกงบประมาณก้อนย่อย
                     </button>
                   )}
                 </div>
@@ -2224,7 +2520,7 @@ export default function Activities({
       )}
 
       {/* Budget Expansion Propose Modal */}
-      {showExpansionModal && selectedOriginalRequest && (
+      {showExpansionModal && selectedActivity && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">
           <div className="bg-white rounded-3xl p-6 max-w-sm w-full border border-slate-100 shadow-2xl space-y-4">
             <div className="flex justify-between items-center pb-1 border-b border-slate-100">
@@ -2238,10 +2534,27 @@ export default function Activities({
               </button>
             </div>
             
-            <div className="bg-purple-50/50 border border-purple-100 rounded-xl p-3 text-[11px] text-purple-900 space-y-1">
-              <p><strong>ขยายงบของคำขอย่อย:</strong> {selectedOriginalRequest.title}</p>
-              <p><strong>งบเดิมที่ได้รับอนุมัติ:</strong> ฿{selectedOriginalRequest.amount.toLocaleString()}</p>
+            {/* Friendly guide banner */}
+            <div className="bg-purple-50 border border-purple-100 rounded-2xl p-3 text-[11px] text-purple-900 space-y-1">
+              <p className="font-bold flex items-center gap-1 text-purple-800">
+                💡 วิธีขอขยายงบประมาณ:
+              </p>
+              <p className="text-[10px] text-purple-700 leading-relaxed">
+                ใช้กรณีงบที่เคยเบิกมาไม่เพียงพอต่อค่าใช้จ่ายจริง และต้องการขอเบิกเงินจากกองทุนเพิ่ม
+              </p>
             </div>
+
+            {selectedOriginalRequest ? (
+              <div className="bg-purple-50/50 border border-purple-100 rounded-xl p-3 text-[11px] text-purple-900 space-y-1">
+                <p><strong>ขยายงบของคำขอย่อย:</strong> {selectedOriginalRequest.title}</p>
+                <p><strong>งบเดิมที่ได้รับอนุมัติ:</strong> ฿{selectedOriginalRequest.amount.toLocaleString()}</p>
+              </div>
+            ) : (
+              <div className="bg-purple-50/50 border border-purple-100 rounded-xl p-3 text-[11px] text-purple-900 space-y-1">
+                <p><strong>โครงการ:</strong> {selectedActivity.title}</p>
+                <p><strong>งบอนุมัติรวมขณะนี้:</strong> ฿{(selectedActivity.budgetApproved || selectedActivity.budgetEstimated || 0).toLocaleString()}</p>
+              </div>
+            )}
 
             <form onSubmit={handleProposeExpansionSubmit} className="space-y-3 text-xs">
               <div className="space-y-1">
@@ -3010,6 +3323,140 @@ export default function Activities({
                 {isDeletingBudgetRequest ? "กำลังลบ..." : "ยืนยันลบคำขอ"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Add Expense Item & Receipt */}
+      {showAddExpenseModal && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-fade-in">
+          <div className="bg-white rounded-3xl p-6 max-w-md w-full shadow-2xl border border-slate-100 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 bg-emerald-100 text-emerald-700 rounded-xl flex items-center justify-center">
+                  <Receipt size={20} />
+                </div>
+                <div>
+                  <h3 className="font-bold text-base text-slate-800 font-display">เพิ่มรายการใช้จริง & ใบเสร็จ</h3>
+                  <p className="text-[11px] text-slate-500 font-sans">บันทึกรายจ่ายและแนบรูปหลักฐานใบเสร็จซื้อของ</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => {
+                  setShowAddExpenseModal(false);
+                  setExpenseItemName("");
+                  setExpenseAmount("");
+                  setExpenseReceiptUrl("");
+                }}
+                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-full hover:bg-slate-100 transition-colors"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmAddExpense} className="space-y-4 text-xs font-sans">
+              <div className="space-y-1">
+                <label className="block font-bold text-slate-700">ชื่อรายการซื้อของ / รายจ่าย *</label>
+                <input 
+                  type="text"
+                  required
+                  placeholder="เช่น ค่าอุปกรณ์ตกแต่งซุ้ม, ค่าใบเสร็จป้ายไวนิล..."
+                  value={expenseItemName}
+                  onChange={(e) => setExpenseItemName(e.target.value)}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 font-medium"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="block font-bold text-slate-700">จำนวนเงินที่จ่ายจริงตามใบเสร็จ (บาท) *</label>
+                <input 
+                  type="number"
+                  step="0.01"
+                  required
+                  placeholder="0.00"
+                  value={expenseAmount}
+                  onChange={(e) => setExpenseAmount(e.target.value)}
+                  className="w-full p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 font-medium"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="block font-bold text-slate-700">แนบรูปภาพใบเสร็จ / บิลเงินสด (ถ้ามี)</label>
+                <div className="border-2 border-dashed border-slate-200 rounded-2xl p-4 text-center hover:bg-slate-50 transition-all">
+                  {expenseReceiptUrl ? (
+                    <div className="space-y-2">
+                      <img 
+                        src={expenseReceiptUrl} 
+                        alt="Receipt preview" 
+                        className="max-h-36 mx-auto rounded-lg object-contain shadow-xs border border-slate-200"
+                      />
+                      <button 
+                        type="button"
+                        onClick={() => setExpenseReceiptUrl("")}
+                        className="text-xs text-rose-600 hover:text-rose-700 font-bold underline cursor-pointer"
+                      >
+                        เปลี่ยนรูปใบเสร็จ
+                      </button>
+                    </div>
+                  ) : (
+                    <div>
+                      <Upload size={24} className="mx-auto text-slate-400 mb-1" />
+                      <label className="cursor-pointer font-bold text-emerald-600 hover:text-emerald-700 text-xs">
+                        คลิกเพื่ออัปโหลดรูปใบเสร็จ
+                        <input 
+                          type="file" 
+                          accept="image/*" 
+                          className="hidden" 
+                          onChange={handleExpenseReceiptFileChange} 
+                        />
+                      </label>
+                      <p className="text-[10px] text-slate-400 mt-0.5">รองรับไฟล์ JPG, PNG (ระบบจะบีบอัดอัตโนมัติ)</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Mock receipt quick selection */}
+              <div className="space-y-1 mt-2">
+                <p className="text-[10px] text-slate-400 font-bold font-sans">หรือเลือกรูปใบเสร็จจำลองสำหรับทดสอบ:</p>
+                <div className="grid grid-cols-3 gap-1">
+                  {mockReceipts.map((rc, idx) => (
+                    <button
+                      key={idx}
+                      type="button"
+                      onClick={() => setExpenseReceiptUrl(rc.url)}
+                      className="text-[9px] bg-slate-100 hover:bg-emerald-50 text-slate-600 hover:text-emerald-700 py-1.5 px-1 rounded-lg border border-slate-200 hover:border-emerald-200 font-medium truncate transition-all text-center cursor-pointer"
+                      title={rc.name}
+                    >
+                      🧾 ใบเสร็จ {idx + 1}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                <button 
+                  type="button" 
+                  onClick={() => {
+                    setShowAddExpenseModal(false);
+                    setExpenseItemName("");
+                    setExpenseAmount("");
+                    setExpenseReceiptUrl("");
+                  }}
+                  disabled={isAddingExpense}
+                  className="bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold px-4 py-2 rounded-xl transition-all cursor-pointer font-sans"
+                >
+                  ยกเลิก
+                </button>
+                <button 
+                  type="submit"
+                  disabled={isAddingExpense}
+                  className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-4 py-2 rounded-xl shadow-md transition-all cursor-pointer font-sans"
+                >
+                  {isAddingExpense ? "กำลังบันทึก..." : "บันทึกใบเสร็จ & ค่าใช้จ่าย"}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

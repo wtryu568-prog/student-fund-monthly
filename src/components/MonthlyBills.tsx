@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { User, MonthlyBill, Payment, getDetailedBillStatus } from "../types";
 import { compressImage } from "../utils/imageCompressor";
+import BatchSlipUploadModal from "./BatchSlipUploadModal";
 
 interface MonthlyBillsProps {
   currentUser: User;
@@ -34,6 +35,7 @@ interface MonthlyBillsProps {
   onCancelSlip: (billId: string, targetUserId?: string) => Promise<any>;
   onRecordCashPayment?: (billId: string, userId: string, amount: number, note?: string) => Promise<any>;
   onDeleteMonthlyBills?: (month: number, year: number) => Promise<any>;
+  onRefreshData?: () => Promise<any>;
 }
 
 export default function MonthlyBills({
@@ -45,12 +47,14 @@ export default function MonthlyBills({
   onSubmitSlip,
   onCancelSlip,
   onRecordCashPayment,
-  onDeleteMonthlyBills
+  onDeleteMonthlyBills,
+  onRefreshData
 }: MonthlyBillsProps) {
   const [targetUserId, setTargetUserId] = useState<string>(currentUser.id);
   const [billClassroomFilter, setBillClassroomFilter] = useState<string>("all");
   const [searchTerm, setSearchTerm] = useState<string>("");
   const [isSelectorOpen, setIsSelectorOpen] = useState<boolean>(false);
+  const [isBatchModalOpen, setIsBatchModalOpen] = useState<boolean>(false);
 
   // Classmate selection for leader or treasurer
   const canSelectClassmate = currentUser.role === "leader" || currentUser.role === "treasurer";
@@ -235,6 +239,7 @@ export default function MonthlyBills({
   };
 
   return (
+    <>
     <div className="space-y-6">
       {/* Header and Classmate Selector */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 bg-white p-5 rounded-3xl border border-slate-100 shadow-sm">
@@ -251,6 +256,15 @@ export default function MonthlyBills({
 
         {canSelectClassmate && (
           <div className="flex flex-col sm:flex-row gap-3 items-stretch sm:items-center w-full sm:w-auto">
+            {/* Batch Slip Upload Trigger Button */}
+            <button
+              type="button"
+              onClick={() => setIsBatchModalOpen(true)}
+              className="px-4 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold text-xs rounded-xl shadow-md hover:shadow-lg transition-all flex items-center justify-center space-x-2 shrink-0 border border-blue-400/30"
+            >
+              <Sparkles className="w-4 h-4 text-amber-300 animate-pulse" />
+              <span>⚡ อัปโหลดสลิปรวมหลายคน</span>
+            </button>
             {currentUser.role === "treasurer" && (
               <div className="space-y-1 sm:text-right w-full sm:w-auto">
                 <label className="block text-[10px] text-slate-500 font-bold uppercase">เลือกห้องเรียน</label>
@@ -839,5 +853,23 @@ export default function MonthlyBills({
       </div>
     </div>
     </div>
+
+    {/* Batch Slip Upload Modal */}
+    <BatchSlipUploadModal
+      isOpen={isBatchModalOpen}
+      onClose={() => setIsBatchModalOpen(false)}
+      currentUser={currentUser}
+      users={users}
+      monthlyBills={monthlyBills}
+      payments={payments}
+      onSuccess={async () => {
+        if (onRefreshData) {
+          await onRefreshData();
+        } else {
+          window.location.reload();
+        }
+      }}
+    />
+    </>
   );
 }

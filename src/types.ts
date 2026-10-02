@@ -124,6 +124,16 @@ export interface MarketTeam {
   createdAt: string;
 }
 
+export interface ActivityExpenseItem {
+  id: string;
+  activityId: string;
+  itemName: string;
+  amount: number;
+  receiptUrl?: string;
+  createdBy: string;
+  createdAt: string;
+}
+
 export interface Activity {
   id: string;
   title: string;
@@ -142,6 +152,7 @@ export interface Activity {
   refundAmount?: number;
   refundSlipUrl?: string;
   expenseReceipts?: string[];
+  itemizedExpenses?: ActivityExpenseItem[];
   settledBy?: string;
   settledAt?: string;
   createdAt: string;
@@ -341,6 +352,40 @@ export interface PasswordReset {
   classroom?: string;
 }
 
+export interface SpecialCampaign {
+  id: string;
+  title: string;
+  description: string;
+  category: "t_shirt" | "activity_gear" | "trip" | "other";
+  isMandatory: boolean; // true = บังคับทุกคนจ่าย, false = สั่งซื้อตามความสมัครใจ
+  amountPerUnit: number;
+  hasOptions: boolean;
+  options?: string[]; // เช่น ["S (36\")", "M (38\")", "L (40\")", "XL (42\")", "2XL (44\")"]
+  status: "active" | "closed";
+  dueDate?: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SpecialOrder {
+  id: string;
+  campaignId: string;
+  userId: string;
+  selectedOption?: string; // เช่น "L (40\")"
+  quantity: number;
+  totalAmount: number;
+  status: "unpaid" | "pending_review" | "paid" | "rejected";
+  slipUrl?: string;
+  paidAt?: string;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  rejectReason?: string;
+  note?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface AppState {
   users: User[];
   settings: SystemSettings;
@@ -357,5 +402,8 @@ export interface AppState {
   logs: Log[];
   petitions: Petition[];
   passwordResets: PasswordReset[];
+  specialCampaigns?: SpecialCampaign[];
+  specialOrders?: SpecialOrder[];
 }
+
 

@@ -25,11 +25,12 @@ import {
   User as UserIcon,
   Database,
   Check,
-  Copy
+  Copy,
+  Shirt
 } from "lucide-react";
 
 // Types
-import { User, MonthlyBill, Payment, Transaction, MarketWeek, MarketItem, BudgetRequest, Announcement, Notification, UserRole, AppState } from "./types";
+import { User, MonthlyBill, Payment, Transaction, MarketWeek, MarketItem, BudgetRequest, Announcement, Notification, UserRole, AppState, SpecialCampaign, SpecialOrder } from "./types";
 
 // Modular Components
 import Dashboard from "./components/Dashboard";
@@ -922,6 +923,40 @@ export default function App() {
     }, "กำลังพิจารณาเงินสนับสนุน...");
   };
 
+  const handleAddExpenseItem = async (activityId: string, itemName: string, amount: number, receiptUrl?: string) => {
+    if (!currentUser) return;
+    return withLoading(async () => {
+      const res = await fetch("/api/activities/expenses/add", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ activityId, itemName, amount, receiptUrl, userId: currentUser.id })
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to add expense item");
+      }
+      await fetchState();
+      return await res.json();
+    }, "กำลังบันทึกรายการซื้อของและใบเสร็จ...");
+  };
+
+  const handleDeleteExpenseItem = async (activityId: string, expenseId: string) => {
+    if (!currentUser) return;
+    return withLoading(async () => {
+      const res = await fetch("/api/activities/expenses/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ activityId, expenseId, userId: currentUser.id })
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || "Failed to delete expense item");
+      }
+      await fetchState();
+      return await res.json();
+    }, "กำลังลบรายการใบเสร็จ...");
+  };
+
 
 
 
@@ -1096,6 +1131,8 @@ export default function App() {
     await fetchState();
   };
 
+
+
   if (isLoading) {
     return (
       <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-4">
@@ -1267,6 +1304,7 @@ export default function App() {
               onCancelSlip={handleCancelSlip}
               onRecordCashPayment={handleRecordCashPayment}
               onDeleteMonthlyBills={handleDeleteMonthlyBills}
+              onRefreshData={fetchState}
             />
           )}
 
@@ -1310,6 +1348,8 @@ export default function App() {
               onApproveExternalIncome={handleApproveExternalIncome}
               onUpdateActivity={handleUpdateActivity}
               onDeleteBudgetRequest={handleDeleteBudgetRequest}
+              onAddExpenseItem={handleAddExpenseItem}
+              onDeleteExpenseItem={handleDeleteExpenseItem}
             />
           )}
 

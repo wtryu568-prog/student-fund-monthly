@@ -42,6 +42,7 @@ export async function loadFullState(): Promise<AppState> {
       supabase.from("logs").select("*").order("created_at", { ascending: false }).limit(500),
       supabase.from("petitions").select("*").order("created_at", { ascending: false }),
       supabase.from("password_resets").select("*").order("requested_at", { ascending: false }),
+      supabase.from("images").select("id, base64").like("id", "act_exp_%"),
     ];
     const results = await Promise.allSettled(queries);
     const getData = (res: PromiseSettledResult<any>) => (res.status === "fulfilled" && !res.value.error ? res.value.data : null);
@@ -61,6 +62,33 @@ export async function loadFullState(): Promise<AppState> {
     logs = getData(results[12]);
     petitions = getData(results[13]);
     passwordResets = getData(results[14]);
+    const actExpImages = getData(results[15]);
+
+    // Populate fallback itemized_expenses for activities if missing or empty
+    if (activities && Array.isArray(activities)) {
+      const expMap = new Map<string, any[]>();
+      if (actExpImages && Array.isArray(actExpImages)) {
+        for (const img of actExpImages) {
+          if (img.id && img.base64) {
+            try {
+              const actId = img.id.replace("act_exp_", "");
+              const parsed = JSON.parse(img.base64);
+              if (Array.isArray(parsed)) {
+                expMap.set(actId, parsed);
+              }
+            } catch (e) {}
+          }
+        }
+      }
+
+      for (const act of activities) {
+        if (!act.itemized_expenses || !Array.isArray(act.itemized_expenses) || act.itemized_expenses.length === 0) {
+          if (expMap.has(act.id)) {
+            act.itemized_expenses = expMap.get(act.id);
+          }
+        }
+      }
+    }
   } catch (err: any) {
     console.warn("[StateLoader] Supabase query notice:", err?.message || err);
   }
@@ -112,6 +140,6 @@ export async function loadFullState(): Promise<AppState> {
     notifications: convertKeysToCamel(notifications || []) as any[],
     logs: convertKeysToCamel(logs || []) as any[],
     petitions: convertKeysToCamel(petitions || []) as any[],
-    passwordResets: convertKeysToCamel(passwordResets || []) as any[],
+    passwordResets: convertKeysToCamel(passwordResets || []) as any[]
   };
 }

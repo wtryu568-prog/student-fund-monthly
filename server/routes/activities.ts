@@ -8,6 +8,7 @@ import { supabase } from "../config/supabase";
 import { convertKeysToCamel } from "../utils/camelCase";
 import { createNotification } from "../services/notificationService";
 import { writeLog } from "../services/logService";
+import { extractAndSaveImage } from "../services/imageService";
 import { asyncHandler } from "../middleware/errorHandler";
 import type { ExternalIncome } from "../types/server";
 
@@ -319,7 +320,7 @@ router.post("/activities/settle/propose", asyncHandler(async (req, res) => {
   if (!activityId || !userId) return res.status(400).json({ error: "Missing parameters" });
   const { data: act } = await supabase.from("activities").select("status").eq("id", activityId).single();
   if (!act) return res.status(404).json({ error: "Activity not found" });
-  if (act.status !== "in_progress" && act.status !== "pending_settlement") return res.status(400).json({ error: "โครงการต้องอยู่ในสถานะกำลังดำเนินงานเพื่อยื่นปิดงาน" });
+  if (act.status !== "approved" && act.status !== "in_progress" && act.status !== "pending_settlement") return res.status(400).json({ error: "โครงการต้องอยู่ในสถานะอนุมัติแล้วหรือกำลังดำเนินงานเพื่อยื่นปิดงาน" });
   await supabase.from("activities").update({ status: "pending_settlement", actual_expense: Number(actualExpense || 0), refund_amount: Number(refundAmount || 0), refund_slip_url: refundSlipUrl || "", expense_receipts: expenseReceipts || [], updated_at: new Date().toISOString() }).eq("id", activityId);
   const { data: updatedAct } = await supabase.from("activities").select("title").eq("id", activityId).single();
   const { data: treasurers } = await supabase.from("users").select("id").eq("role", "treasurer");
@@ -355,4 +356,188 @@ router.post("/activities/settle/approve", asyncHandler(async (req, res) => {
   res.json({ success: true, activity: convertKeysToCamel(updated) });
 }));
 
+// Add itemized expense receipt for activity
+// Helper to safely retrieve itemized expenses with fallback storage
+async function getItemizedExpensesForActivity(act: any): Promise<any[]> {
+  if (Array.isArray(act.itemized_expenses) && act.itemized_expenses.length > 0) {
+    return act.itemized_expenses;
+  }
+  try {
+    const { data } = await supabase
+      .from("images")
+      .select("base64")
+      .eq("id", `act_exp_${act.id}`)
+      .single();
+
+    if (data && data.base64) {
+      const parsed = JSON.parse(data.base64);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (e) {}
+  return act.itemized_expenses || [];
+}
+
+// Add itemized expense receipt for activity
+router.post("/activities/expenses/add", asyncHandler(async (req, res) => {
+  const { activityId, itemName, amount, receiptUrl, userId } = req.body;
+  if (!activityId || !itemName || !amount || !userId) {
+    return res.status(400).json({ error: "กรุณาระบุโครงการ รายการสินค้า ยอดเงิน และผู้บันทึกให้ครบถ้วนค่ะ" });
+  }
+
+  const numAmount = Number(amount);
+  if (isNaN(numAmount) || numAmount <= 0) {
+    return res.status(400).json({ error: "ยอดเงินของใบเสร็จต้องเป็นตัวเลขที่มากกว่า 0 บาท" });
+  }
+
+  const { data: act } = await supabase.from("activities").select("*").eq("id", activityId).single();
+  if (!act) return res.status(404).json({ error: "ไม่พบข้อมูลโครงการนี้" });
+
+  let processedReceiptUrl = receiptUrl || "";
+  if (processedReceiptUrl.startsWith("data:image/")) {
+    processedReceiptUrl = await extractAndSaveImage(processedReceiptUrl, "/api/activities/expenses/add", { activityId, title: itemName });
+  }
+
+  const newItem = {
+    id: `exp_item_${Date.now()}_${Math.random().toString(36).substring(2, 5)}`,
+    activity_id: activityId,
+    item_name: itemName,
+    amount: numAmount,
+    receipt_url: processedReceiptUrl,
+    created_by: userId,
+    created_at: new Date().toISOString()
+  };
+
+  const currentExpenses = await getItemizedExpensesForActivity(act);
+  const updatedExpenses = [newItem, ...currentExpenses];
+
+  // Calculate new total actual expense
+  const totalActual = updatedExpenses.reduce((sum: number, item: any) => sum + Number(item.amount || 0), 0);
+  const budgetApproved = Number(act.budget_approved || act.budget_estimated || 0);
+  const newRefund = Math.max(0, budgetApproved - totalActual);
+
+  // Collect receipt URLs into expense_receipts array for backward compatibility
+  const allReceipts = updatedExpenses.map((i: any) => i.receipt_url).filter(Boolean);
+
+  let updatedAct: any = null;
+
+  // 1. Try standard update with itemized_expenses column
+  const updateResult = await supabase
+    .from("activities")
+    .update({
+      itemized_expenses: updatedExpenses,
+      actual_expense: totalActual,
+      refund_amount: newRefund,
+      expense_receipts: allReceipts,
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", activityId)
+    .select("*")
+    .single();
+
+  if (updateResult.error) {
+    console.warn("[Activities] Column 'itemized_expenses' not found in table. Using fallback storage in images table.");
+    // 2. Fallback update without itemized_expenses column
+    const fallbackUpdate = await supabase
+      .from("activities")
+      .update({
+        actual_expense: totalActual,
+        refund_amount: newRefund,
+        expense_receipts: allReceipts,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", activityId)
+      .select("*")
+      .single();
+
+    if (fallbackUpdate.error) {
+      return res.status(500).json({ error: fallbackUpdate.error.message });
+    }
+    updatedAct = fallbackUpdate.data;
+
+    // Save itemized_expenses in images table as JSON
+    await supabase.from("images").upsert({
+      id: `act_exp_${activityId}`,
+      base64: JSON.stringify(updatedExpenses)
+    });
+  } else {
+    updatedAct = updateResult.data;
+  }
+
+  if (updatedAct) {
+    updatedAct.itemized_expenses = updatedExpenses;
+  }
+
+  await writeLog(userId, "add_activity_expense_item", "activity", activityId, { itemName, amount: numAmount });
+  res.json({ success: true, activity: convertKeysToCamel(updatedAct) });
+}));
+
+// Delete itemized expense receipt for activity
+router.post("/activities/expenses/delete", asyncHandler(async (req, res) => {
+  const { activityId, expenseId, userId } = req.body;
+  if (!activityId || !expenseId || !userId) {
+    return res.status(400).json({ error: "Missing parameters" });
+  }
+
+  const { data: act } = await supabase.from("activities").select("*").eq("id", activityId).single();
+  if (!act) return res.status(404).json({ error: "Activity not found" });
+
+  const currentExpenses = await getItemizedExpensesForActivity(act);
+  const updatedExpenses = currentExpenses.filter((item: any) => item.id !== expenseId);
+
+  const totalActual = updatedExpenses.reduce((sum: number, item: any) => sum + Number(item.amount || 0), 0);
+  const budgetApproved = Number(act.budget_approved || act.budget_estimated || 0);
+  const newRefund = Math.max(0, budgetApproved - totalActual);
+  const allReceipts = updatedExpenses.map((i: any) => i.receipt_url).filter(Boolean);
+
+  let updatedAct: any = null;
+
+  const updateResult = await supabase
+    .from("activities")
+    .update({
+      itemized_expenses: updatedExpenses,
+      actual_expense: totalActual,
+      refund_amount: newRefund,
+      expense_receipts: allReceipts,
+      updated_at: new Date().toISOString()
+    })
+    .eq("id", activityId)
+    .select("*")
+    .single();
+
+  if (updateResult.error) {
+    console.warn("[Activities] Column 'itemized_expenses' not found in table. Using fallback storage in images table.");
+    const fallbackUpdate = await supabase
+      .from("activities")
+      .update({
+        actual_expense: totalActual,
+        refund_amount: newRefund,
+        expense_receipts: allReceipts,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", activityId)
+      .select("*")
+      .single();
+
+    if (fallbackUpdate.error) {
+      return res.status(500).json({ error: fallbackUpdate.error.message });
+    }
+    updatedAct = fallbackUpdate.data;
+
+    await supabase.from("images").upsert({
+      id: `act_exp_${activityId}`,
+      base64: JSON.stringify(updatedExpenses)
+    });
+  } else {
+    updatedAct = updateResult.data;
+  }
+
+  if (updatedAct) {
+    updatedAct.itemized_expenses = updatedExpenses;
+  }
+
+  await writeLog(userId, "delete_activity_expense_item", "activity", activityId, { expenseId });
+  res.json({ success: true, activity: convertKeysToCamel(updatedAct) });
+}));
+
 export default router;
+

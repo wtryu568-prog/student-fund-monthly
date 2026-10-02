@@ -41,6 +41,7 @@ import {
   LogIn
 } from "lucide-react";
 import { User, Payment, MonthlyBill, Transaction, getDetailedBillStatus, SystemSettings, PasswordReset, AppState } from "../types";
+import BatchSlipUploadModal from "./BatchSlipUploadModal";
 import { googleSignIn, logoutGoogle, getAccessToken, getStoredUser, clearGoogleSession, auth as driveAuth } from "../lib/driveAuth";
 import { 
   uploadBackupToDrive, 
@@ -111,6 +112,7 @@ interface AdminPanelProps {
   onSendReminder: (targetUserId: string, message: string, title?: string) => Promise<unknown>;
   onResolveResetPassword: (resetId: string) => Promise<unknown>;
   onResetSystemData?: (keepUsers: boolean, keepSettings: boolean) => Promise<unknown>;
+  onRefreshData?: () => Promise<unknown>;
 }
 
 export default function AdminPanel({
@@ -131,12 +133,14 @@ export default function AdminPanel({
   onUpdateSettings,
   onSendReminder,
   onResolveResetPassword,
-  onResetSystemData
+  onResetSystemData,
+  onRefreshData
 }: AdminPanelProps) {
   const { withLoading } = useLoading();
   const pendingPayments = payments.filter(p => p.status === "pending_review");
   const activeUsersCount = users.filter(u => u.isActive).length;
   const [selectedPayment, setSelectedPayment] = useState<Payment | null>(pendingPayments[0] || null);
+  const [isBatchModalOpen, setIsBatchModalOpen] = useState<boolean>(false);
 
   // Backup & Recovery States
   const [backups, setBackups] = useState<LocalBackupFile[]>([]);
@@ -1475,6 +1479,13 @@ export default function AdminPanel({
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setIsBatchModalOpen(true)}
+                className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-3.5 py-2 rounded-xl flex items-center gap-1.5 transition-all shadow-sm cursor-pointer"
+              >
+                <span>⚡ อัปโหลดสลิปรวมหลายคน</span>
+              </button>
               <button
                 type="button"
                 onClick={() => setShowMigrationModal(true)}
@@ -4051,6 +4062,23 @@ export default function AdminPanel({
         </div>
       </div>
     )}
+
+    {/* Batch Slip Upload Modal */}
+    <BatchSlipUploadModal
+      isOpen={isBatchModalOpen}
+      onClose={() => setIsBatchModalOpen(false)}
+      currentUser={currentUser}
+      users={users}
+      monthlyBills={monthlyBills}
+      payments={payments}
+      onSuccess={async () => {
+        if (onRefreshData) {
+          await onRefreshData();
+        } else {
+          window.location.reload();
+        }
+      }}
+    />
   </div>
   );
 }
