@@ -1304,6 +1304,9 @@ export default function App() {
               onCancelSlip={handleCancelSlip}
               onRecordCashPayment={handleRecordCashPayment}
               onDeleteMonthlyBills={handleDeleteMonthlyBills}
+              onApprovePayment={handleApprovePayment}
+              onRejectPayment={handleRejectPayment}
+              onUpdateSettings={handleUpdateSettings}
               onRefreshData={fetchState}
             />
           )}

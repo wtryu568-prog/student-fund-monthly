@@ -35,6 +35,9 @@ interface MonthlyBillsProps {
   onCancelSlip: (billId: string, targetUserId?: string) => Promise<any>;
   onRecordCashPayment?: (billId: string, userId: string, amount: number, note?: string) => Promise<any>;
   onDeleteMonthlyBills?: (month: number, year: number) => Promise<any>;
+  onApprovePayment?: (paymentId: string, treasurerId: string, note?: string) => Promise<any>;
+  onRejectPayment?: (paymentId: string, treasurerId: string, rejectReason: string) => Promise<any>;
+  onUpdateSettings?: (fundName: string, monthlyFee: number, promptpayNumber: string, promptpayName: string, promptpayQrUrl?: string, bankName?: string) => Promise<any>;
   onRefreshData?: () => Promise<any>;
 }
 
@@ -48,6 +51,9 @@ export default function MonthlyBills({
   onCancelSlip,
   onRecordCashPayment,
   onDeleteMonthlyBills,
+  onApprovePayment,
+  onRejectPayment,
+  onUpdateSettings,
   onRefreshData
 }: MonthlyBillsProps) {
   const [targetUserId, setTargetUserId] = useState<string>(currentUser.id);
@@ -99,6 +105,69 @@ export default function MonthlyBills({
   const [customAmount, setCustomAmount] = useState<number>(0);
   const [copiedText, setCopiedText] = useState<boolean>(false);
   const [paymentMethod, setPaymentMethod] = useState<"transfer" | "cash">("transfer");
+  const [isSendingRoomReminder, setIsSendingRoomReminder] = useState<boolean>(false);
+  const [reminderSuccessText, setReminderSuccessText] = useState<string | null>(null);
+  const [rejectingPaymentId, setRejectingPaymentId] = useState<string | null>(null);
+  const [rejectReasonInput, setRejectReasonInput] = useState<string>("");
+  const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+
+  const handleSendRoomReminder = async () => {
+    if (!currentUser) return;
+    setIsSendingRoomReminder(true);
+    try {
+      const res = await fetch("/api/payments/remind-unpaid", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          senderId: currentUser.id,
+          classroom: currentUser.classroom,
+          billId: selectedBill?.id
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setReminderSuccessText(`ส่งการแจ้งเตือนทวงเงินไปยังเพื่อนในห้องเรียบร้อยแล้ว (${data.remindedCount} คน) 🎉`);
+        setTimeout(() => setReminderSuccessText(null), 4000);
+      } else {
+        alert(data.error || "เกิดข้อผิดพลาดในการส่งแจ้งเตือน");
+      }
+    } catch (err: any) {
+      alert("ไม่สามารถส่งแจ้งเตือนได้: " + (err.message || String(err)));
+    } finally {
+      setIsSendingRoomReminder(false);
+    }
+  };
+
+  const handleApproveSlipQuick = async (paymentId: string) => {
+    if (!onApprovePayment) return;
+    setActionLoadingId(paymentId);
+    try {
+      await onApprovePayment(paymentId, currentUser.id);
+      if (onRefreshData) await onRefreshData();
+    } catch (err: any) {
+      alert("อนุมัติสลิปไม่สำเร็จ: " + (err.message || String(err)));
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  const handleRejectSlipQuick = async (paymentId: string) => {
+    if (!onRejectPayment || !rejectReasonInput.trim()) {
+      alert("กรุณาระบุเหตุผลการปฏิเสธสลิปค่ะ");
+      return;
+    }
+    setActionLoadingId(paymentId);
+    try {
+      await onRejectPayment(paymentId, currentUser.id, rejectReasonInput.trim());
+      setRejectingPaymentId(null);
+      setRejectReasonInput("");
+      if (onRefreshData) await onRefreshData();
+    } catch (err: any) {
+      alert("ปฏิเสธสลิปไม่สำเร็จ: " + (err.message || String(err)));
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
 
   const pendingPayment = selectedBill ? myPayments.find(p => p.billId === selectedBill.id && p.status === "pending_review") : null;
   const isCashPending = pendingPayment?.slipUrl === "cash";
@@ -241,6 +310,180 @@ export default function MonthlyBills({
   return (
     <>
     <div className="space-y-6">
+
+      {/* Classroom Leader Dedicated Dashboard Card (Only for Leaders) */}
+      {currentUser.role === "leader" && (
+        <div className="bg-gradient-to-br from-emerald-500/10 via-teal-500/5 to-white p-5 rounded-3xl border border-emerald-200/80 shadow-sm space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-emerald-200/60 pb-3">
+            <div>
+              <h3 className="font-extrabold text-emerald-900 text-base flex items-center gap-2">
+                👑 แดชบอร์ดติดตามสลิปและกองทุนประจำห้อง ({currentUser.classroom || "ห้องเรียนของฉัน"})
+              </h3>
+              <p className="text-xs text-slate-600">
+                สิทธิ์หัวหน้าห้อง: สามารถตรวจสอบรูปสลิป, กดอนุมัติ/ปฏิเสธรายการเพื่อนในห้อง และส่งแจ้งเตือนทวงเงินได้ทันที
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleSendRoomReminder}
+                disabled={isSendingRoomReminder}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-300 text-white font-bold text-xs rounded-xl shadow-md transition-all flex items-center gap-1.5 cursor-pointer"
+              >
+                <Sparkles size={13} className={isSendingRoomReminder ? "animate-spin" : ""} />
+                {isSendingRoomReminder ? "กำลังส่งแจ้งเตือน..." : "🔔 ส่งแจ้งเตือนทวงเงินเพื่อนในห้อง"}
+              </button>
+            </div>
+          </div>
+
+          {reminderSuccessText && (
+            <div className="p-3 bg-emerald-100 text-emerald-800 text-xs font-bold rounded-2xl animate-in fade-in">
+              {reminderSuccessText}
+            </div>
+          )}
+
+          {/* Quick Stats for Class Leader */}
+          {(() => {
+            const roomStudents = users.filter(u => u.classroom === currentUser.classroom && u.isActive);
+            const roomBillUserIds = new Set(roomStudents.map(u => u.id));
+            const roomPendingPayments = payments.filter(p => roomBillUserIds.has(p.userId) && p.status === "pending_review");
+            
+            const selectedMonth = selectedBill ? selectedBill.month : (monthlyBills[0]?.month || 1);
+            const selectedYear = selectedBill ? selectedBill.year : (monthlyBills[0]?.year || 2569);
+            const cycleBills = monthlyBills.filter(b => b.month === selectedMonth && b.year === selectedYear && roomBillUserIds.has(b.userId));
+
+            const paidCount = cycleBills.filter(b => b.status === "paid").length;
+            const pendingCount = roomPendingPayments.length;
+            const unpaidCount = cycleBills.filter(b => b.status === "pending").length;
+
+            return (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-center">
+                  <div className="p-3 bg-white border border-slate-200/80 rounded-2xl">
+                    <span className="text-[10px] text-slate-500 font-bold block">นักศึกษาในห้อง</span>
+                    <span className="text-lg font-mono font-extrabold text-slate-800">{roomStudents.length} คน</span>
+                  </div>
+                  <div className="p-3 bg-white border border-emerald-200/80 rounded-2xl">
+                    <span className="text-[10px] text-emerald-600 font-bold block">ชำระแล้ว</span>
+                    <span className="text-lg font-mono font-extrabold text-emerald-600">{paidCount} คน</span>
+                  </div>
+                  <div className="p-3 bg-white border border-amber-200/80 rounded-2xl">
+                    <span className="text-[10px] text-amber-600 font-bold block">รอตรวจสลิป</span>
+                    <span className="text-lg font-mono font-extrabold text-amber-600">{pendingCount} รายการ</span>
+                  </div>
+                  <div className="p-3 bg-white border border-rose-200/80 rounded-2xl">
+                    <span className="text-[10px] text-rose-600 font-bold block">ค้างชำระ</span>
+                    <span className="text-lg font-mono font-extrabold text-rose-600">{unpaidCount} คน</span>
+                  </div>
+                </div>
+
+                {/* Pending Slips list for Class Leader */}
+                {roomPendingPayments.length > 0 ? (
+                  <div className="space-y-2 bg-white p-4 rounded-2xl border border-emerald-200">
+                    <h4 className="font-bold text-slate-800 text-xs flex items-center gap-1.5">
+                      <Clock size={14} className="text-amber-500 animate-pulse" /> 
+                      รายการสลิปที่รอหัวหน้าห้องตรวจสอบและอนุมัติ ({roomPendingPayments.length} รายการ):
+                    </h4>
+                    <div className="divide-y divide-slate-100">
+                      {roomPendingPayments.map(pay => {
+                        const student = users.find(u => u.id === pay.userId);
+                        const isCash = pay.slipUrl === "cash";
+                        const isRejecting = rejectingPaymentId === pay.id;
+
+                        return (
+                          <div key={pay.id} className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                            <div className="flex items-center gap-3">
+                              {pay.slipUrl && !isCash && pay.slipUrl !== "deleted" ? (
+                                <a href={pay.slipUrl} target="_blank" rel="noreferrer" title="คลิกเพื่อขยายสลิป">
+                                  <img 
+                                    src={pay.slipUrl} 
+                                    alt="slip" 
+                                    className="w-12 h-12 object-cover rounded-xl border border-slate-200 shadow-sm hover:scale-105 transition-all"
+                                  />
+                                </a>
+                              ) : (
+                                <div className="w-12 h-12 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center font-bold text-amber-700 text-[10px]">
+                                  💵 เงินสด
+                                </div>
+                              )}
+
+                              <div>
+                                <span className="font-bold text-slate-800 block text-xs">
+                                  {student?.fullName || "สมาชิก"} ({student?.nickname || "เพื่อน"})
+                                </span>
+                                <span className="text-[10px] text-slate-400 block font-mono">
+                                  รหัสนักศึกษา: {student?.studentId || "-"} | ยอด: <strong className="text-emerald-700 font-bold">฿{pay.amount}</strong>
+                                </span>
+                                {pay.note && <span className="text-[10px] text-slate-500 italic block">หมายเหตุ: {pay.note}</span>}
+                              </div>
+                            </div>
+
+                            {!isRejecting ? (
+                              <div className="flex items-center gap-2 self-end sm:self-center">
+                                <button
+                                  type="button"
+                                  disabled={actionLoadingId === pay.id}
+                                  onClick={() => handleApproveSlipQuick(pay.id)}
+                                  className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-sm transition-all flex items-center gap-1 disabled:bg-slate-300"
+                                >
+                                  <Check size={13} /> {actionLoadingId === pay.id ? "กำลังอนุมัติ..." : "อนุมัติสลิป"}
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={actionLoadingId === pay.id}
+                                  onClick={() => {
+                                    setRejectingPaymentId(pay.id);
+                                    setRejectReasonInput("");
+                                  }}
+                                  className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-xs rounded-xl transition-all"
+                                >
+                                  ปฏิเสธ
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="bg-rose-50 p-2.5 rounded-xl border border-rose-200 space-y-2 w-full sm:w-auto">
+                                <input
+                                  type="text"
+                                  value={rejectReasonInput}
+                                  onChange={(e) => setRejectReasonInput(e.target.value)}
+                                  placeholder="ระบุเหตุผลการปฏิเสธ (เช่น รูปไม่ชัด/ยอดไม่ตรง)..."
+                                  className="w-full sm:w-64 p-2 bg-white border border-rose-300 rounded-lg text-xs outline-none"
+                                />
+                                <div className="flex justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setRejectingPaymentId(null)}
+                                    className="px-2.5 py-1 text-slate-500 text-xs font-bold"
+                                  >
+                                    ยกเลิก
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={actionLoadingId === pay.id}
+                                    onClick={() => handleRejectSlipQuick(pay.id)}
+                                    className="px-3 py-1 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-lg shadow-sm"
+                                  >
+                                    {actionLoadingId === pay.id ? "กำลังส่ง..." : "ยืนยันปฏิเสธ"}
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="p-3 bg-white rounded-2xl border border-emerald-100 text-center text-slate-500 text-xs font-medium">
+                    🎉 ไม่มีสลิปค้างรอตรวจสอบในห้อง {currentUser.classroom} ข้อมูลอัปเดตเรียบร้อยแล้วค่ะ
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </div>
+      )}
       {/* Header and Classmate Selector */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 bg-white p-5 rounded-3xl border border-slate-100 shadow-sm">
         <div className="space-y-1">

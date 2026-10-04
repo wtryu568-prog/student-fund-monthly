@@ -76,10 +76,10 @@ router.post("/payments/submit", asyncHandler(async (req, res) => {
   await supabase.from("payments").insert(newPayment);
   await updateBillStatus(billId);
 
-  const { data: treasurers } = await supabase.from("users").select("id, full_name").eq("role", "treasurer");
   const { data: user } = await supabase.from("users").select("full_name").eq("id", userId).single();
+  const { data: treasurers } = await supabase.from("users").select("id, full_name").eq("role", "treasurer");
   for (const t of (treasurers || [])) {
-    await createNotification(t.id, "มีสลิปใหม่รอการตรวจสอบ", `คุณ ${user?.full_name || "สมาชิก"} ได้อัปโหลดสลิปสำหรับบิลเดือนนี้แล้ว กรุณาตรวจสอบและอนุมัติ`, "payment", paymentId, "payment");
+    await createNotification(t.id, "มีสลิปใหม่รอการตรวจสอบ 💵", `คุณ ${user?.full_name || "สมาชิก"} ได้อัปโหลดสลิปสำหรับบิลเดือนนี้แล้ว กรุณาตรวจสอบและอนุมัติ`, "payment", paymentId, "payment");
   }
 
   await writeLog(userId, "submit_payment_slip", "payment", paymentId, { billId, amount: numAmount });
@@ -215,17 +215,21 @@ router.post("/payments/approve", asyncHandler(async (req, res) => {
   const { paymentId, treasurerId, note } = req.body;
   if (!paymentId || !treasurerId) return res.status(400).json({ error: "ข้อมูลไม่ครบถ้วนค่ะ" });
 
-  const { data: actingUser } = await supabase.from("users").select("role").eq("id", treasurerId).single();
-  if (!actingUser || actingUser.role !== "treasurer") {
-    return res.status(403).json({ error: "ไม่มีสิทธิ์ดำเนินการ (เฉพาะเหรัญญิกเท่านั้น)" });
+  const { data: actingUser } = await supabase.from("users").select("role, classroom, full_name").eq("id", treasurerId).single();
+  if (!actingUser || (actingUser.role !== "treasurer" && actingUser.role !== "leader" && actingUser.role !== "president")) {
+    return res.status(403).json({ error: "ไม่มีสิทธิ์ดำเนินการ (เฉพาะเหรัญญิกและหัวหน้าห้องเท่านั้น)" });
   }
 
   const { data: payment } = await supabase.from("payments").select("*").eq("id", paymentId).single();
   if (!payment) return res.status(404).json({ error: "ไม่พบรายการชำระเงินนี้" });
   if (payment.status === "approved") return res.json({ success: true, payment: convertKeysToCamel(payment) });
 
-  const { data: bill } = await supabase.from("monthly_bills").select("*").eq("id", payment.bill_id).single();
   const { data: user } = await supabase.from("users").select("*").eq("id", payment.user_id).single();
+  if (actingUser.role === "leader" && user?.classroom && user.classroom !== actingUser.classroom) {
+    return res.status(403).json({ error: "หัวหน้าห้องสามารถอนุมัติสลิปเฉพาะสมาชิกในห้องเรียนของตนเองเท่านั้นค่ะ" });
+  }
+
+  const { data: bill } = await supabase.from("monthly_bills").select("*").eq("id", payment.bill_id).single();
 
   const monthStr = bill ? String(bill.month).padStart(2, "0") : "00";
   const yearStr = bill ? bill.year : "2569";
@@ -238,7 +242,8 @@ router.post("/payments/approve", asyncHandler(async (req, res) => {
   const txId = `tx_${Date.now()}`;
   await supabase.from("transactions").insert({ id: txId, type: "income", category: "monthly_fee", amount: payment.amount, description: `ค่าบำรุงกองทุนรายเดือน (${bill ? `${bill.month}/${bill.year}` : ""}) - ${user?.full_name || "นักศึกษา"}`, reference_id: payment.id, reference_type: "payment", created_by: treasurerId, approved_by: treasurerId, approved_at: new Date().toISOString(), month: bill ? bill.month : new Date().getMonth() + 1, year: bill ? bill.year : 2569, is_closed: false, created_at: new Date().toISOString() });
 
-  await createNotification(payment.user_id, "ชำระเงินกองทุนอนุมัติสำเร็จแล้ว 🎉", `เหรัญญิกตรวจสอบการชำระเงินเดือนนี้แล้ว ยอดเงิน ${payment.amount} บาท เลขใบเสร็จคือ ${receiptNumber}`, "payment", payment.id, "payment");
+  const reviewerTitle = actingUser.role === "leader" ? `หัวหน้าห้อง (${actingUser.full_name})` : "เหรัญญิก";
+  await createNotification(payment.user_id, "ชำระเงินกองทุนอนุมัติสำเร็จแล้ว 🎉", `${reviewerTitle}ตรวจสอบการชำระเงินเดือนนี้แล้ว ยอดเงิน ${payment.amount} บาท เลขใบเสร็จคือ ${receiptNumber}`, "payment", payment.id, "payment");
   await writeLog(treasurerId, "approve_payment", "payment", paymentId, { studentId: user?.student_id, amount: payment.amount });
 
   const { data: updated } = await supabase.from("payments").select("*").eq("id", paymentId).single();
@@ -250,21 +255,26 @@ router.post("/payments/reject", asyncHandler(async (req, res) => {
   const { paymentId, treasurerId, rejectReason } = req.body;
   if (!paymentId || !treasurerId || !rejectReason) return res.status(400).json({ error: "ข้อมูลไม่ครบถ้วนค่ะ" });
 
-  const { data: actingUser } = await supabase.from("users").select("role").eq("id", treasurerId).single();
-  if (!actingUser || actingUser.role !== "treasurer") {
-    return res.status(403).json({ error: "ไม่มีสิทธิ์ดำเนินการ (เฉพาะเหรัญญิกเท่านั้น)" });
+  const { data: actingUser } = await supabase.from("users").select("role, classroom, full_name").eq("id", treasurerId).single();
+  if (!actingUser || (actingUser.role !== "treasurer" && actingUser.role !== "leader" && actingUser.role !== "president")) {
+    return res.status(403).json({ error: "ไม่มีสิทธิ์ดำเนินการ (เฉพาะเหรัญญิกและหัวหน้าห้องเท่านั้น)" });
   }
 
   const { data: payment } = await supabase.from("payments").select("*").eq("id", paymentId).single();
   if (!payment) return res.status(404).json({ error: "ไม่พบรายการชำระเงินนี้" });
+
+  const { data: user } = await supabase.from("users").select("*").eq("id", payment.user_id).single();
+  if (actingUser.role === "leader" && user?.classroom && user.classroom !== actingUser.classroom) {
+    return res.status(403).json({ error: "หัวหน้าห้องสามารถปฏิเสธสลิปเฉพาะสมาชิกในห้องเรียนของตนเองเท่านั้นค่ะ" });
+  }
 
   await supabase.from("payments").update({ status: "rejected", reviewed_by: treasurerId, reviewed_at: new Date().toISOString(), reject_reason: rejectReason }).eq("id", paymentId);
 
   const { data: bill } = await supabase.from("monthly_bills").select("id").eq("id", payment.bill_id).single();
   if (bill) await updateBillStatus(bill.id);
 
-  await createNotification(payment.user_id, "❌ คำขอชำระเงินกองทุนถูกปฏิเสธ", `รายการชำระเงินของคุณถูกเหรัญญิกปฏิเสธด้วยเหตุผล: "${rejectReason}"`, "payment", payment.id, "payment");
-  const { data: user } = await supabase.from("users").select("student_id").eq("id", payment.user_id).single();
+  const reviewerTitle = actingUser.role === "leader" ? `หัวหน้าห้อง (${actingUser.full_name})` : "เหรัญญิก";
+  await createNotification(payment.user_id, "❌ คำขอชำระเงินกองทุนถูกปฏิเสธ", `รายการชำระเงินของคุณถูก${reviewerTitle}ปฏิเสธด้วยเหตุผล: "${rejectReason}"`, "payment", payment.id, "payment");
   await writeLog(treasurerId, "reject_payment", "payment", paymentId, { studentId: user?.student_id, reason: rejectReason });
 
   const { data: updated } = await supabase.from("payments").select("*").eq("id", paymentId).single();
@@ -524,6 +534,66 @@ router.post("/payments/bulk-submit", asyncHandler(async (req, res) => {
     errors,
     message: `นำเข้าสลิปสำเร็จ ${processedPayments.length} รายการ จากทั้งหมด ${items.length} รายการ`
   });
+}));
+
+// Send reminder notification to unpaid members in a classroom or system-wide
+router.post("/payments/remind-unpaid", asyncHandler(async (req, res) => {
+  const { billId, classroom, senderId } = req.body;
+  if (!senderId) {
+    return res.status(400).json({ error: "กรุณาระบุผู้ส่งการแจ้งเตือนค่ะ" });
+  }
+
+  const { data: sender } = await supabase.from("users").select("role, full_name, classroom").eq("id", senderId).single();
+  if (!sender || (sender.role !== "treasurer" && sender.role !== "leader" && sender.role !== "president")) {
+    return res.status(403).json({ error: "เฉพาะเหรัญญิกและหัวหน้าห้องเท่านั้นที่สามารถส่งการแจ้งเตือนทวงเงินได้ค่ะ" });
+  }
+
+  const targetClassroom = classroom || (sender.role === "leader" ? sender.classroom : null);
+
+  let targetMonth = new Date().getMonth() + 1;
+  let targetYear = new Date().getFullYear() + 543;
+  let amount = 150;
+
+  if (billId) {
+    const { data: bill } = await supabase.from("monthly_bills").select("month, year, amount").eq("id", billId).single();
+    if (bill) {
+      targetMonth = bill.month;
+      targetYear = bill.year;
+      amount = bill.amount;
+    }
+  }
+
+  let userQuery = supabase.from("users").select("id, full_name, classroom").eq("is_active", true);
+  if (targetClassroom) {
+    userQuery = userQuery.eq("classroom", targetClassroom);
+  }
+  const { data: targetUsers } = await userQuery;
+
+  const { data: billsInCycle } = await supabase.from("monthly_bills").select("id, user_id, status").eq("month", targetMonth).eq("year", targetYear);
+  
+  const pendingUserIds = new Set(
+    (billsInCycle || [])
+      .filter((b: any) => b.status === "pending" || b.status === "pending_review")
+      .map((b: any) => b.user_id)
+  );
+
+  let remindedCount = 0;
+  for (const u of (targetUsers || [])) {
+    if (pendingUserIds.has(u.id)) {
+      await createNotification(
+        u.id,
+        "🔔 แจ้งเตือนชำระค่าบำรุงกองทุนประจำเดือน",
+        `สวัสดีคุณ ${u.full_name}, ${sender.full_name} (${sender.role === "leader" ? `หัวหน้าห้อง ${sender.classroom}` : "เหรัญญิก"}) ขอแจ้งเตือนการชำระค่าบำรุงกองทุนประจำเดือน ${targetMonth}/${targetYear} จำนวน ${amount} บาท กรุณาชำระและแนบสลิปผ่านระบบค่ะ`,
+        "bill",
+        billId || `bill_${u.id}`,
+        "bill"
+      );
+      remindedCount++;
+    }
+  }
+
+  await writeLog(senderId, "remind_unpaid_members", "payments", billId || "current_cycle", { targetClassroom, remindedCount });
+  res.json({ success: true, remindedCount, message: `ส่งแจ้งเตือนไปยังสมาชิกค้างชำระเรียบร้อยแล้วจำนวน ${remindedCount} ท่าน` });
 }));
 
 export default router;

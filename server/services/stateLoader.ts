@@ -120,7 +120,14 @@ export async function loadFullState(): Promise<AppState> {
 
   const settings = (settingsArr && settingsArr.length > 0 
     ? convertKeysToCamel(settingsArr[0])
-    : { fundName: "เงินเก็บTns รุ่น06", monthlyFee: 150, promptpayNumber: "081-234-5678", promptpayName: "นภาวรรณ แก้วดี (เหรัญญิกกองทุน)", promptpayQrUrl: "", bankName: "พร้อมเพย์" }) as unknown as SystemSettings & { id?: unknown };
+    : { fundName: "เงินเก็บTns รุ่น06", monthlyFee: 150, promptpayNumber: "081-234-5678", promptpayName: "นภาวรรณ แก้วดี (เหรัญญิกกองทุน)", promptpayQrUrl: "", bankName: "พร้อมเพย์" }) as unknown as SystemSettings & { id?: unknown; collectionMode?: unknown };
+
+  if (settings.bankName && settings.bankName.includes("|MODE:")) {
+    settings.bankName = settings.bankName.split("|MODE:")[0];
+  }
+  if (settings.collectionMode) {
+    delete settings.collectionMode;
+  }
 
   // Remove the singleton ID from settings
   if (settings.id) delete settings.id;

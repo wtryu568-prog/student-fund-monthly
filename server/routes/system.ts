@@ -478,17 +478,29 @@ router.post("/settings", asyncHandler(async (req, res) => {
   if (!userId) return res.status(400).json({ error: "Missing userId" });
 
   const numericFee = Number(monthlyFee);
+
   const settingsData = {
-    id: "main", fund_name: fundName, monthly_fee: numericFee, promptpay_number: promptpayNumber,
-    promptpay_name: promptpayName, promptpay_qr_url: promptpayQrUrl || "", bank_name: bankName || "พร้อมเพย์",
+    id: "main",
+    fund_name: fundName,
+    monthly_fee: numericFee,
+    promptpay_number: promptpayNumber,
+    promptpay_name: promptpayName,
+    promptpay_qr_url: promptpayQrUrl || "",
+    bank_name: bankName || "พร้อมเพย์",
     updated_at: new Date().toISOString()
   };
-  await supabase.from("settings").upsert(settingsData, { onConflict: "id" });
+
+  const { error: upsertErr } = await supabase.from("settings").upsert(settingsData, { onConflict: "id" });
+  if (upsertErr) throw upsertErr;
+
   await supabase.from("monthly_bills").update({ amount: numericFee }).eq("status", "pending");
 
   await writeLog(userId, "update_settings", "settings", "global", settingsData);
-  const { data: updatedSettings } = await supabase.from("settings").select("*").eq("id", "main").single();
-  res.json({ success: true, settings: convertKeysToCamel(updatedSettings) });
+
+  const { data: rawUpdated } = await supabase.from("settings").select("*").eq("id", "main").single();
+  const camelUpdated = convertKeysToCamel(rawUpdated) as any;
+
+  res.json({ success: true, settings: camelUpdated });
 }));
 
 // Supabase config for client-side realtime

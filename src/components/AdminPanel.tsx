@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { 
   CheckCircle2, 
   XCircle, 
@@ -1070,6 +1070,17 @@ export default function AdminPanel({
   const [promptpayQrUrl, setPromptpayQrUrl] = useState<string>(settings.promptpayQrUrl || "");
   const [setBankName, setSetBankName] = useState<string>(settings.bankName || "พร้อมเพย์");
   const [isUpdatingSettings, setIsUpdatingSettings] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (settings) {
+      setSetFundName(settings.fundName || "");
+      setSetMonthlyFee(settings.monthlyFee || 150);
+      setSetPromptpayNumber(settings.promptpayNumber || "");
+      setSetPromptpayName(settings.promptpayName || "");
+      setPromptpayQrUrl(settings.promptpayQrUrl || "");
+      setSetBankName(settings.bankName || "พร้อมเพย์");
+    }
+  }, [settings]);
 
   const handleQrUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
