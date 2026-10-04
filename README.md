@@ -18,3 +18,9 @@ View your app in AI Studio: https://ai.studio/apps/3ff9ead7-31a6-4fac-858c-c8d75
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+
+## Deploy to Cloudflare Pages
+- **Framework Preset:** React (Vite)
+- **Build Command:** `npx vite build`
+- **Output Directory:** `dist`
+
